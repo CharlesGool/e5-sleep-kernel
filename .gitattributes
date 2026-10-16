@@ -1,0 +1,5 @@
+*.sh text eol=lf
+*.py text eol=lf
+*.patch text eol=lf
+*.gz binary
+*.zip binary

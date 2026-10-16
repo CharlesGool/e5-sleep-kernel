@@ -1,0 +1,61 @@
+--- a/drivers/watchdog/ump9620-pmic-wdt.c	2026-10-16 06:51:20.369702100 +0800
++++ b/drivers/watchdog/ump9620-pmic-wdt.c	2026-10-16 06:51:50.481759900 +0800
+@@ -4,6 +4,10 @@
+  * Android, the PM co-processor firmware takes it over. Mainline has no PM firmware, so this driver takes it over
+  * instead: it shortens the timeout and lets the watchdog core ping it until userspace opens /dev/watchdog. A hard
+  * hang then resets the board, and LK falls back to Android. MU300 bring-up driver.
++ *
++ * The PMIC stays powered in suspend and so does its watchdog: nothing pings it while the AP sleeps (procd is
++ * frozen), so a suspend longer than the timeout reset the board. It is stopped for system sleep and armed again,
++ * with a full timeout, on resume -- what the PM firmware does on Android.
+  */
+ #include <linux/bits.h>
+ #include <linux/delay.h>
+@@ -88,6 +92,26 @@
+ 	return ump9620_wdt_ping(wdd);
+ }
+ 
++static int ump9620_wdt_suspend(struct device *dev)
++{
++	struct ump9620_wdt *w = dev_get_drvdata(dev);
++
++	if (!watchdog_hw_running(&w->wdd))
++		return 0;
++	return ump9620_wdt_ctrl(w, false);
++}
++
++static int ump9620_wdt_resume(struct device *dev)
++{
++	struct ump9620_wdt *w = dev_get_drvdata(dev);
++
++	if (!watchdog_hw_running(&w->wdd))
++		return 0;
++	return ump9620_wdt_start(&w->wdd);
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(ump9620_wdt_pm_ops, ump9620_wdt_suspend, ump9620_wdt_resume);
++
+ static const struct watchdog_info ump9620_wdt_info = {
+ 	.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE,
+ 	.identity = "UMP9620 PMIC watchdog",
+@@ -123,6 +147,7 @@
+ 	w->wdd.max_timeout = WDT_MAX;
+ 	w->wdd.timeout = WDT_DEFAULT;
+ 	watchdog_set_drvdata(&w->wdd, w);
++	platform_set_drvdata(pdev, w);
+ 	watchdog_stop_on_reboot(&w->wdd);
+ 
+ 	regmap_read(w->map, w->base + WDT_CTRL, &ctrl);
+@@ -148,7 +173,11 @@
+ 
+ static struct platform_driver ump9620_wdt_driver = {
+ 	.probe = ump9620_wdt_probe,
+-	.driver = { .name = "ump9620-wdt", .of_match_table = ump9620_wdt_match },
++	.driver = {
++		.name = "ump9620-wdt",
++		.of_match_table = ump9620_wdt_match,
++		.pm = pm_sleep_ptr(&ump9620_wdt_pm_ops),
++	},
+ };
+ module_platform_driver(ump9620_wdt_driver);
+ MODULE_DESCRIPTION("UMP9620 PMIC watchdog");
