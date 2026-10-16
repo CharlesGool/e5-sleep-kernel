@@ -1,0 +1,246 @@
+From c871c8318f984c1063e7c82168e6e09235e2258c Mon Sep 17 00:00:00 2001
+From: CharlesGool <gzcheng0822@gmail.com>
+Date: Fri, 16 Oct 2026 09:54:05 +0800
+Subject: [PATCH 5/5] soc: sprd: add the UMS9621 camera subsystem power domain
+
+The camera block (PD_CAMERA) comes out of the bootloader powered, with its
+AON MM_EB gate open, and has no auto shutdown.  The stock kernel's camera
+driver forces it off whenever no camera is open; with no camera driver
+nothing does, and while it is on the AP subsystem cannot reach PMU deep
+sleep in system suspend.
+
+Register the vendor node ("sprd,qogirl6l-camsys-domain", <&mm_domain>) as
+a generic PM domain that starts off: power_off sets PD_CAMERA's force
+shutdown and gates MM_EB, power_on reverses that and waits for the PMU to
+report the domain up.  ISP, DCAM, JPEG and the sensors already reference
+it with power-domains = <&mm_domain>, so they get it on demand.
+---
+ drivers/soc/sprd/domain/Kconfig          |  13 ++
+ drivers/soc/sprd/domain/Makefile         |   1 +
+ drivers/soc/sprd/domain/sprd_camsys_pd.c | 184 +++++++++++++++++++++++
+ 3 files changed, 198 insertions(+)
+ create mode 100644 drivers/soc/sprd/domain/sprd_camsys_pd.c
+
+diff --git a/drivers/soc/sprd/domain/Kconfig b/drivers/soc/sprd/domain/Kconfig
+index e032565..fc579e8 100644
+--- a/drivers/soc/sprd/domain/Kconfig
++++ b/drivers/soc/sprd/domain/Kconfig
+@@ -20,3 +20,16 @@ config SPRD_VPU_PW_DOMAIN
+ 	  genpd core returns -EPROBE_DEFER and no display device ever
+ 	  probes.  Stock ships this as sprd-vpu-pw-domain.ko in
+ 	  vendor_dlkm; here it is built in-tree from the vendor source.
++
++config SPRD_CAMSYS_PD
++	tristate "UMS9621 camera subsystem power domain"
++	default m
++	depends on ARCH_SPRD || COMPILE_TEST
++	depends on MFD_SYSCON
++	select PM_GENERIC_DOMAINS if PM
++	help
++	  Generic PM domain for the UMS9621 camera block
++	  ("sprd,qogirl6l-camsys-domain").  The bootloader leaves the
++	  domain powered, and while it is on the AP subsystem cannot
++	  enter PMU deep sleep in system suspend.  The domain starts off
++	  and is powered only while a consumer is runtime active.
+diff --git a/drivers/soc/sprd/domain/Makefile b/drivers/soc/sprd/domain/Makefile
+index 0ce25b3..79b4f57 100644
+--- a/drivers/soc/sprd/domain/Makefile
++++ b/drivers/soc/sprd/domain/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_SPRD_DISP_PM_DOMAIN_SHARKL3)	+= sprd_disp_pm_domain_sharkl3.o
+ obj-$(CONFIG_SPRD_VPU_PW_DOMAIN)		+= sprd_vpu_pw_domain.o
++obj-$(CONFIG_SPRD_CAMSYS_PD)		+= sprd_camsys_pd.o
+diff --git a/drivers/soc/sprd/domain/sprd_camsys_pd.c b/drivers/soc/sprd/domain/sprd_camsys_pd.c
+new file mode 100644
+index 0000000..9b8fc9e
+--- /dev/null
++++ b/drivers/soc/sprd/domain/sprd_camsys_pd.c
+@@ -0,0 +1,184 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Camera subsystem power domain for UMS9621 ("qogirn6lite").
++ *
++ * The camera block (PD_CAMERA in the PMU) has no auto shutdown and comes out
++ * of the bootloader powered, with its AON MM_EB gate open.  The stock kernel's
++ * camera driver forces it off whenever no camera is open; without that the
++ * AP subsystem never enters PMU deep sleep during system suspend
++ * (AP_DEEP_SLEEP_CNT stays at 0).  This driver turns the vendor node
++ * ("sprd,qogirl6l-camsys-domain", <&mm_domain>) into a generic PM domain
++ * that starts off, so the domain is powered only while a consumer (ISP, DCAM,
++ * JPEG, a sensor) is runtime active -- which on these boards is never.
++ *
++ * The register layout comes from the vendor DT as <&syscon reg mask>
++ * triples, the same way the vendor driver reads it.
++ *
++ * Copyright (C) 2026 The e5-linux project
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/regmap.h>
++
++#define CAMSYS_STATE_ON		0
++#define CAMSYS_POLL_US		50
++#define CAMSYS_POLL_MAX		200
++
++struct camsys_reg {
++	struct regmap *map;
++	u32 reg;
++	u32 mask;
++};
++
++struct camsys_pd {
++	struct generic_pm_domain gpd;
++	struct device *dev;
++	struct camsys_reg force_shutdown;
++	struct camsys_reg power_state;
++	struct clk *mm_eb;
++};
++
++static int camsys_reg_get(struct device *dev, const char *prop,
++			  struct camsys_reg *out)
++{
++	u32 args[2];
++
++	out->map = syscon_regmap_lookup_by_phandle_args(dev->of_node, prop,
++							2, args);
++	if (IS_ERR(out->map))
++		return dev_err_probe(dev, PTR_ERR(out->map),
++				     "no %s property/syscon\n", prop);
++
++	out->reg = args[0];
++	out->mask = args[1];
++
++	return 0;
++}
++
++static int camsys_pd_power_on(struct generic_pm_domain *gpd)
++{
++	struct camsys_pd *pd = container_of(gpd, struct camsys_pd, gpd);
++	unsigned int val;
++	int ret, i;
++
++	ret = clk_prepare_enable(pd->mm_eb);
++	if (ret)
++		return ret;
++
++	regmap_update_bits(pd->force_shutdown.map, pd->force_shutdown.reg,
++			   pd->force_shutdown.mask, 0);
++
++	for (i = 0; i < CAMSYS_POLL_MAX; i++) {
++		regmap_read(pd->power_state.map, pd->power_state.reg, &val);
++		if ((val & pd->power_state.mask) == CAMSYS_STATE_ON)
++			return 0;
++		udelay(CAMSYS_POLL_US);
++	}
++
++	dev_err(pd->dev, "camera domain did not power up (state 0x%x)\n",
++		val & pd->power_state.mask);
++	regmap_update_bits(pd->force_shutdown.map, pd->force_shutdown.reg,
++			   pd->force_shutdown.mask, pd->force_shutdown.mask);
++	clk_disable_unprepare(pd->mm_eb);
++
++	return -ETIMEDOUT;
++}
++
++static int camsys_pd_power_off(struct generic_pm_domain *gpd)
++{
++	struct camsys_pd *pd = container_of(gpd, struct camsys_pd, gpd);
++
++	regmap_update_bits(pd->force_shutdown.map, pd->force_shutdown.reg,
++			   pd->force_shutdown.mask, pd->force_shutdown.mask);
++	clk_disable_unprepare(pd->mm_eb);
++
++	return 0;
++}
++
++static int camsys_pd_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct camsys_pd *pd;
++	int ret;
++
++	pd = devm_kzalloc(dev, sizeof(*pd), GFP_KERNEL);
++	if (!pd)
++		return -ENOMEM;
++
++	pd->dev = dev;
++
++	ret = camsys_reg_get(dev, "force_shutdown", &pd->force_shutdown);
++	if (ret)
++		return ret;
++	ret = camsys_reg_get(dev, "camera_power_state", &pd->power_state);
++	if (ret)
++		return ret;
++
++	pd->mm_eb = devm_clk_get(dev, "clk_mm_eb");
++	if (IS_ERR(pd->mm_eb))
++		return dev_err_probe(dev, PTR_ERR(pd->mm_eb),
++				     "no clk_mm_eb\n");
++
++	/*
++	 * The bootloader leaves the domain on and the gate open, but the clock
++	 * framework counts MM_EB as unused (and clk_ignore_unused keeps it
++	 * that way).  Take a reference so power_off() can drop it and the
++	 * gate really closes.
++	 */
++	ret = clk_prepare_enable(pd->mm_eb);
++	if (ret)
++		return ret;
++	camsys_pd_power_off(&pd->gpd);
++
++	pd->gpd.name = dev_name(dev);
++	pd->gpd.power_on = camsys_pd_power_on;
++	pd->gpd.power_off = camsys_pd_power_off;
++
++	ret = pm_genpd_init(&pd->gpd, NULL, true);
++	if (ret)
++		return ret;
++
++	ret = of_genpd_add_provider_simple(dev->of_node, &pd->gpd);
++	if (ret) {
++		pm_genpd_remove(&pd->gpd);
++		return ret;
++	}
++
++	platform_set_drvdata(pdev, pd);
++	dev_info(dev, "camera power domain forced off\n");
++
++	return 0;
++}
++
++static void camsys_pd_remove(struct platform_device *pdev)
++{
++	struct camsys_pd *pd = platform_get_drvdata(pdev);
++
++	of_genpd_del_provider(pdev->dev.of_node);
++	pm_genpd_remove(&pd->gpd);
++}
++
++static const struct of_device_id camsys_pd_of_match[] = {
++	{ .compatible = "sprd,qogirl6l-camsys-domain" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, camsys_pd_of_match);
++
++static struct platform_driver camsys_pd_driver = {
++	.probe = camsys_pd_probe,
++	.remove = camsys_pd_remove,
++	.driver = {
++		.name = "sprd-camsys-pd",
++		.of_match_table = camsys_pd_of_match,
++	},
++};
++module_platform_driver(camsys_pd_driver);
++
++MODULE_DESCRIPTION("UMS9621 camera subsystem power domain");
++MODULE_LICENSE("GPL");
+-- 
+2.52.0.windows.1
+
