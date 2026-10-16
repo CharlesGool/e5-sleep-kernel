@@ -1,6 +1,6 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核：`6.18.54-e5-sleep1`
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核：`6.18.54-e5-sleep1`，以及含全部修复和 7 个信息屏应用的完整刷机包 `e5-sleep2`（见下文“刷机包”）
 
 *A kernel for the Rongyue E5 running OpenWrt (e5-linux) that can sleep: the PMIC watchdog stopped across system suspend, CPU idle states, a display driver warning fixed, and the GPU and camera power domains off in suspend so the AP reaches PMU deep sleep*
 
@@ -26,6 +26,41 @@
 - 看门狗补丁未单独验证（没有 ftrace；直接让它睡过 30 秒而不停看门狗，失败会复位回 Android），
   热点省电的 sleep.sh 仍在挂起前后停 / 启看门狗，两者叠加无害。
 - 休眠电流尚未长时间实测。
+
+## 刷机包：E5 深度休眠版（e5-sleep2）
+
+**下载：[Openwrt_E5_Flasher_sleep2.zip](https://github.com/CharlesGool/e5-sleep-kernel/releases/download/e5-sleep2/Openwrt_E5_Flasher_sleep2.zip)**（164 MB，
+[Release 页面](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep2)）
+SHA-256 `a042e325360b48bd2bb22d56cc8d0a490d37d79e2d66b5e106fdf7ad6215be6d`
+
+在官方 2026-10-13 刷机包（OpenWrt 25.12.5，e5-linux 359ae54）基础上改的完整刷机包，**只适用于 E5**：
+
+- 内核 `6.18.54-e5-sleep2`：官方构建流程编译，含 0001–0005 全部补丁，相机电源域驱动直接编进内核；
+- 启动镜像：以官方 boot.img 为底，只换内核和 initramfs 里的 45 个模块；
+- 根文件系统：官方镜像，加新内核的模块、预装 7 个信息屏应用，SIM 状态时间戳改用 CLOCK_BOOTTIME；
+  镜像版本显示为 `359ae54+e5-sleep2`。
+
+| 预装应用 | 版本 |
+|---|---|
+| [热点省电](https://github.com/CharlesGool/e5-hotspot-saver)（含熄屏深度休眠，默认开） | 2.6 |
+| [底部导航](https://github.com/CharlesGool/e5-navbar) | 1.4 |
+| [禁用 IPv6](https://github.com/CharlesGool/e5-noipv6) | 1.0 |
+| [功率监测](https://github.com/CharlesGool/e5-powermon) | 1.2 |
+| [侧键开关热点](https://github.com/CharlesGool/e5-sidekey) | 1.3 |
+| [音量键功能](https://github.com/CharlesGool/e5-volkeys) | 1.2 |
+| [网页版应用](https://github.com/CharlesGool/e5-webapps) | 1.4 |
+
+用法与官方刷机包相同（详见包内 `README.zh-CN.md`）：
+
+- **新装**（Android 下，Magisk root，USB 调试）：解压后运行 `flash.cmd`（Windows）或 `./flash.sh`；
+  不插 SD 卡、装到手机存储用 `install-userdata.cmd` / `flash.cmd --data`；
+- **已装 OpenWrt 的升级**（OpenWrt 运行中，USB 连着电脑）：`flash.cmd --update`，
+  保留设置、密码、SSH 密钥、流量记录和已装的信息屏应用（已装的旧版应用会留着旧版本）；
+- **从 Android 切回 OpenWrt**：`flash.cmd --boot-openwrt`（原版包的这个命令会因 boot_b 哈希不同而拒绝），或 Magisk 切回模块。
+
+实测（`--update` 升级到本包）：91 个模块加载、0 失败、无 WARNING / Oops；应用都在，后台服务自动装好，原有设置保留；
+相机域开机即关；热点省电关掉射频后自己挂起 239 秒，AP 和 DDR 都进了深睡（PMU 深睡计数随挂起增加）。
+在同样修复下，休眠功耗由约 70 mW 降到 40 mW 以下。
 
 ## AP 深睡（0004、0005）
 
@@ -116,6 +151,7 @@ x86_64 Linux + Docker：
 ```sh
 bash build/build-e5-sleep1.sh ./work          # 约 5 分钟（20 核）
 REF=1 bash build/build-e5-sleep1.sh ./work    # 不加补丁的 e5-mobile4，用来和设备上的比较
+SLEEP2=1 bash build/build-e5-sleep1.sh ./work # e5-sleep2：再加 0004、0005，相机电源域编进内核
 python3 tools/repack-boot.py <刷机包>/files/boot.img work/dist-sleep1/Image.lk work/dist-sleep1/modules boot-e5-sleep1.img
 ```
 
@@ -126,6 +162,8 @@ Image.lk 同为 31262728 字节。
 
 `tools/repack-boot.py` 以刷机包的 boot.img 为底，只换内核和 initramfs 里的 45 个 `.ko`，
 init、busybox、f2fs 修复工具逐字节保留，vbmeta 和 AVB 尾部照搬（这台已解锁的设备不强制 AVB）。
+
+e5-sleep2 刷机包的根文件系统由 [`build/make-rootfs-sleep2.sh`](build/make-rootfs-sleep2.sh) 生成：解开官方 `openwrt.ext4.gz`，放入 e5-linux `upstream/stage-root-modules.py` 布局的新内核模块、按信息屏 `plugin install` 的规则装入 7 个应用、改 SIM 状态时间戳，再压缩回去。包里的 `boot.json`、`VERSION`、`SHA256SUMS` 随之更新，`flash.py` 等脚本与官方一致。
 
 ## 诊断工具
 
