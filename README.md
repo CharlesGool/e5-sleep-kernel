@@ -34,7 +34,7 @@
 
 **下载：[Openwrt_E5_Flasher_sleep4.zip](https://github.com/CharlesGool/e5-sleep-kernel/releases/download/e5-sleep4/Openwrt_E5_Flasher_sleep4.zip)**（164 MB，
 [Release 页面](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep4)）
-SHA-256 `fa08627d879a2b80fa1f863180c7513889ed39ec9d0428258d0a0746219f7779`
+SHA-256 `d7bbc517ae057607257df674697e031bf4abe83c8836a8a21d96716acca4fc92`
 
 （上一版 [e5-sleep2](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep2) 只有 0001–0005，芯片进不了芯片级休眠，建议升级。）
 
@@ -60,7 +60,8 @@ SHA-256 `fa08627d879a2b80fa1f863180c7513889ed39ec9d0428258d0a0746219f7779`
 - **新装**（Android 下，Magisk root，USB 调试）：解压后运行 `flash.cmd`（Windows）或 `./flash.sh`；
   不插 SD 卡、装到手机存储用 `install-userdata.cmd` / `flash.cmd --data`；
 - **已装 OpenWrt 的升级**（OpenWrt 运行中，USB 连着电脑）：`flash.cmd --update`，
-  保留设置、密码、SSH 密钥、流量记录和已装的信息屏应用（已装的旧版应用会留着旧版本）；
+  保留设置、密码、SSH 密钥、流量记录和已装的信息屏应用（已装的旧版应用会留着旧版本），
+  **以及用 apk 另装的软件包**（官方刷机包不保留，见下）；
 - **从 Android 切回 OpenWrt**：`flash.cmd --boot-openwrt`（原版包的这个命令会因 boot_b 哈希不同而拒绝），或 Magisk 切回模块。
 
 实测（`--update` 升级到本包）：91 个模块加载、0 失败、无 WARNING / Oops；应用都在，后台服务自动装好，原有设置保留；
@@ -70,6 +71,17 @@ USB 关闭（仅充电）切换、重启后保持、恢复均正常。
 关于功耗：只有 0001–0005 时（e5-sleep2），一整天的功率监测数据算出熄屏休眠约 19 mA（约 73 mW），
 每次休眠都很稳定——芯片级休眠没有发生，这正是 0006 修的问题。0006 之后的长时间休眠功耗还没有测完。
 （之前说的“降到 40 mW 以下”来自一段很短的观察，电量计 0.1% 的精度不够，不准确。）
+
+### `--update` 保留另装的软件包
+
+官方刷机包的 `--update` 只保留设置，用 `apk` 另装的软件包（OpenClash、sftp……）升级后就没了。本包的
+`files/device-install-image.sh` 增加了 `carry_packages`：对比旧系统和新镜像的 apk 数据库，旧系统有、新镜像没有的包
+（连同它们带进来的依赖和 kmod）在新旧是同一个 OpenWrt 版本（`DISTRIB_REVISION`）时原样带过去——文件、数据库记录、
+安装脚本、`world`、`/etc` 下只有它们用的目录（OpenClash 的 `/etc/openclash`：订阅、核心）和已启用的服务（`/etc/rc.d`）。
+镜像自带而旧系统用别的包替换掉的（`dnsmasq` → `dnsmasq-full`，两者有同名文件）从新镜像里去掉；
+没有冲突的镜像自带包保留（旧系统删掉的主题之类会回来）。版本不同时不复制，包名写进 `/etc/e5/apk-carry.list`，
+升级后 `apk add $(cat /etc/e5/apk-carry.list)` 重装。这一步出错不会中断升级。在设备上用假旧系统（测试包、
+`dnsmasq-full` 替换）对 e5-sleep4 镜像实测通过；`apk info` 能正常识别搬过去的包。
 
 ## AP 深睡（0004、0005）
 
