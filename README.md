@@ -206,7 +206,7 @@ Image.lk 同为 31262728 字节。
 `tools/repack-boot.py` 以刷机包的 boot.img 为底，只换内核和 initramfs 里的 45 个 `.ko`，
 init、busybox、f2fs 修复工具逐字节保留，vbmeta 和 AVB 尾部照搬（这台已解锁的设备不强制 AVB）。
 
-刷机包的根文件系统由 [`build/make-rootfs-sleep4.sh`](build/make-rootfs-sleep4.sh)（e5-sleep2 时是 [`make-rootfs-sleep2.sh`](build/make-rootfs-sleep2.sh)）生成：解开官方 `openwrt.ext4.gz`，放入 e5-linux `upstream/stage-root-modules.py` 布局的新内核模块、按信息屏 `plugin install` 的规则装入 7 个应用、改 SIM 状态时间戳，再压缩回去。包里的 `boot.json`、`VERSION`、`SHA256SUMS` 随之更新，`flash.py` 等脚本与官方一致。
+刷机包（根文件系统、启动镜像、应用和升级脚本）的制作方法和脚本在 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)。
 
 ## 诊断工具
 
