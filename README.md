@@ -1,10 +1,12 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核：`6.18.54-e5-sleep1`，以及含全部修复和 7 个信息屏应用的完整刷机包 `e5-sleep4`（见下文“刷机包”）
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep8-charles`**（补丁 0001–0009，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8)）。
 
-*A kernel for the Rongyue E5 running OpenWrt (e5-linux) that can sleep: the PMIC watchdog stopped across system suspend, CPU idle states, a display driver warning fixed, the GPU and camera power domains off in suspend so the AP reaches PMU deep sleep, and the USB PLL released so the whole chip reaches chip-level sleep*
+**刷机包已移到单独的仓库 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)**（含这个内核、按上游 e5-linux 从源码重建的系统、信息屏应用、LuCI 网页升级）；本仓库只发内核。
 
-在官方 E5 内核 `6.18.54-e5-mobile4`（e5-linux 2026-10-13 刷机包）的基础上：
+*A kernel for the Rongyue E5 running OpenWrt (e5-linux) that can sleep: the PMIC watchdog stopped across system suspend, CPU idle states, a display driver warning fixed, the GPU and camera power domains off in suspend so the AP reaches PMU deep sleep, the USB PLL released so the whole chip reaches chip-level sleep, the fuel gauge's sleep-calibration wake-up once in about 9 h instead of every 2320 s, and suspend with USB plugged in while USB data is off. Flash packages: [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher).*
+
+官方 E5 内核构建流程（linux-lts-e5 `020b970e351e`，e5-sleep5 起是上游 e5-linux `bb8775e` 的内核适配：显示 / eMMC DMA / EIC / 温度 / SIPA / 电量计 / Wi-Fi SAE）加以下补丁：
 
 | 改动 | 说明 |
 |---|---|
@@ -15,6 +17,8 @@
 | [0005](patches/0005-soc-sprd-add-the-UMS9621-camera-subsystem-power-doma.patch) 相机电源域 | 新驱动 `sprd_camsys_pd`：引导程序留下上电的相机域开机即强制关断，有设备用时才开 |
 | [0006](patches/0006-usb-musb-sprd-release-the-USB3.1-PLL-across-system-suspend.patch) 挂起时释放 USB PLL | musb 驱动开机就把 USB3.1 PLL 设成强制开启且从不释放，整颗芯片因此进不了芯片级休眠 |
 | [0007](patches/0007-usb-musb-sprd-do-not-poll-while-USB-data-is-disabled.patch) USB 数据关闭时不轮询 | 原厂“禁用 USB 数据”开关为 0 时，musb 状态机每 200 毫秒醒一次空转 |
+| [0008](patches/0008-power-supply-ump96xx-fgu-relax_cnt_threshold-module-parameter.patch) 电量计休眠校准唤醒 | 电量计的休眠校准每 2320 秒（设备树 580 × 4 秒）把系统唤醒一次读开路电压；模块参数 `relax_cnt_threshold` 默认 8191（约 9 小时），写 0 恢复设备树的值 |
+| [0009](patches/0009-usb-musb-sprd-suspend-with-VBUS-while-USB-data-is-off.patch) USB 数据关闭时插着线也能挂起 | 设备模式下有 VBUS 时 musb 拒绝系统挂起；USB 数据关闭（`usb_data_enabled` 为 0）时端口没人用，按没插线处理：关控制器、PHY，释放 USB PLL |
 
 0004 和 0005 合起来让 AP 子系统在挂起时真正进入 PMU 深睡（见下文“AP 深睡”）；0006 再让整颗芯片进入芯片级休眠
 （关 26 MHz 晶振、降压，见下文“芯片级休眠”）。
@@ -30,58 +34,22 @@
   热点省电的 sleep.sh 仍在挂起前后停 / 启看门狗，两者叠加无害。
 - 休眠电流尚未长时间实测。
 
-## 刷机包：E5 深度休眠版（e5-sleep4）
+## 版本
 
-**下载：[Openwrt_E5_Flasher_sleep4.zip](https://github.com/CharlesGool/e5-sleep-kernel/releases/download/e5-sleep4/Openwrt_E5_Flasher_sleep4.zip)**（164 MB，
-[Release 页面](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep4)）
-SHA-256 `d7bbc517ae057607257df674697e031bf4abe83c8836a8a21d96716acca4fc92`
+| 内核 | 补丁 | 说明 |
+|---|---|---|
+| `6.18.54-e5-sleep8-charles` | 0001–0009 | 当前版本；上游 e5-linux `bb8775e` 的内核适配，编译者 `charles@e5`。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8) |
+| `6.18.54-e5-sleep5-charles` | 0001–0008 | 第一个按 bb8775e 构建的版本 |
+| `6.18.54-e5-sleep4` | 0001–0007 | 官方 2026-10-13 刷机包的内核适配（e5-linux 359ae54） |
+| `6.18.54-e5-sleep2` | 0001–0005 | |
+| `6.18.54-e5-sleep1` | 0001–0003 | |
 
-（上一版 [e5-sleep2](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep2) 只有 0001–0005，芯片进不了芯片级休眠，建议升级。）
-
-在官方 2026-10-13 刷机包（OpenWrt 25.12.5，e5-linux 359ae54）基础上改的完整刷机包，**只适用于 E5**：
-
-- 内核 `6.18.54-e5-sleep4`：官方构建流程编译，含 0001–0007 全部补丁，相机电源域驱动直接编进内核；
-- 启动镜像：以官方 boot.img 为底，只换内核和 initramfs 里的 45 个模块；
-- 根文件系统：官方镜像，加新内核的模块、预装 7 个信息屏应用，SIM 状态时间戳改用 CLOCK_BOOTTIME；
-  镜像版本显示为 `359ae54+e5-sleep4`。
-
-| 预装应用 | 版本 |
-|---|---|
-| [热点省电](https://github.com/CharlesGool/e5-hotspot-saver)（含熄屏深度休眠，默认开；CPU 关闭核心；USB 关闭（仅充电）） | 2.8 |
-| [底部导航](https://github.com/CharlesGool/e5-navbar) | 1.4 |
-| [禁用 IPv6](https://github.com/CharlesGool/e5-noipv6) | 1.0 |
-| [功率监测](https://github.com/CharlesGool/e5-powermon) | 1.2 |
-| [侧键开关热点](https://github.com/CharlesGool/e5-sidekey) | 1.3 |
-| [音量键功能](https://github.com/CharlesGool/e5-volkeys) | 1.2 |
-| [网页版应用](https://github.com/CharlesGool/e5-webapps) | 1.4 |
-
-用法与官方刷机包相同（详见包内 `README.zh-CN.md`）：
-
-- **新装**（Android 下，Magisk root，USB 调试）：解压后运行 `flash.cmd`（Windows）或 `./flash.sh`；
-  不插 SD 卡、装到手机存储用 `install-userdata.cmd` / `flash.cmd --data`；
-- **已装 OpenWrt 的升级**（OpenWrt 运行中，USB 连着电脑）：`flash.cmd --update`，
-  保留设置、密码、SSH 密钥、流量记录和已装的信息屏应用（已装的旧版应用会留着旧版本），
-  **以及用 apk 另装的软件包**（官方刷机包不保留，见下）；
-- **从 Android 切回 OpenWrt**：`flash.cmd --boot-openwrt`（原版包的这个命令会因 boot_b 哈希不同而拒绝），或 Magisk 切回模块。
-
-实测（`--update` 升级到本包）：91 个模块加载、0 失败、无 WARNING / Oops；应用都在，后台服务自动装好，原有设置保留；
-相机域开机即关；拔线挂起时 AP、DDR 进入深睡，整颗芯片进入芯片级休眠（PMU 计数随挂起增加）；
-USB 关闭（仅充电）切换、重启后保持、恢复均正常。
+刷机包（e5-sleep2、e5-sleep4 曾在本仓库的 Release 里发布）从 e5-sleep8 起在
+[e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher) 发布。
 
 关于功耗：只有 0001–0005 时（e5-sleep2），一整天的功率监测数据算出熄屏休眠约 19 mA（约 73 mW），
 每次休眠都很稳定——芯片级休眠没有发生，这正是 0006 修的问题。0006 之后的长时间休眠功耗还没有测完。
 （之前说的“降到 40 mW 以下”来自一段很短的观察，电量计 0.1% 的精度不够，不准确。）
-
-### `--update` 保留另装的软件包
-
-官方刷机包的 `--update` 只保留设置，用 `apk` 另装的软件包（OpenClash、sftp……）升级后就没了。本包的
-`files/device-install-image.sh` 增加了 `carry_packages`：对比旧系统和新镜像的 apk 数据库，旧系统有、新镜像没有的包
-（连同它们带进来的依赖和 kmod）在新旧是同一个 OpenWrt 版本（`DISTRIB_REVISION`）时原样带过去——文件、数据库记录、
-安装脚本、`world`、`/etc` 下只有它们用的目录（OpenClash 的 `/etc/openclash`：订阅、核心）和已启用的服务（`/etc/rc.d`）。
-镜像自带而旧系统用别的包替换掉的（`dnsmasq` → `dnsmasq-full`，两者有同名文件）从新镜像里去掉；
-没有冲突的镜像自带包保留（旧系统删掉的主题之类会回来）。版本不同时不复制，包名写进 `/etc/e5/apk-carry.list`，
-升级后 `apk add $(cat /etc/e5/apk-carry.list)` 重装。这一步出错不会中断升级。在设备上用假旧系统（测试包、
-`dnsmasq-full` 替换）对 e5-sleep4 镜像实测通过；`apk info` 能正常识别搬过去的包。
 
 ## AP 深睡（0004、0005）
 
@@ -147,7 +115,26 @@ initramfs 的 `panfrost.ko` 换掉，把 `sprd_camsys_pd.ko` 放进 rootfs 的 `
 醒一次空转、打一行日志，拔了线也一样。开关写回 1 时驱动本来就会重新跑状态机，所以 0007 让它停下等待，
 关闭 20 秒内不再有一次轮询（之前约 100 次）。
 
-## 安装
+## 电量计休眠校准（0008）
+
+深度休眠时系统大约每 2320 秒被唤醒一次，来源是电量计（UMP9620 FGU）的休眠校准：电池电流低于 30 mA 时，
+它的 relax 计数器每 4 秒加一，数满设备树的 `sprd,relax-counter-threshold`（580）就唤醒系统读开路电压、校正电量。
+0008 给 `ump96xx_fuel_gauge` 加模块参数 `relax_cnt_threshold`：默认 8191（寄存器 13 位的最大值，约 9 小时），
+范围 320–8191，0 表示用设备树的值；每次挂起时读取，改了下一次挂起生效。这个模块在 boot_b 的 initramfs 里加载。
+
+确认生效：`cat /sys/module/ump96xx_fuel_gauge/parameters/relax_cnt_threshold` 读出 `8191`，
+每次挂起的内核日志里有 `Sleep calib mode config done!!! (relax_cnt_th 8191)`。
+
+## 插着线也能挂起（0009）
+
+musb 在设备模式下只要有 VBUS 就拒绝系统挂起（`Abort PM suspend in device mode`），所以插着线时从不休眠。
+USB 数据关闭时（原厂“禁用 USB 数据”开关 `usb_data_enabled` 为 0，热点省电 3.0 的 USB“关闭（不充电）”就是这样，
+同时充电芯片保持 HiZ、由电池供电），端口没有任何用途：0009 让它照没插线时那样挂起——控制器和 PHY 断电、
+释放 USB PLL（0006），日志 `PM suspend with VBUS: USB data is off`。开关写回 1 时状态机照常重新运行。
+
+## 安装 e5-sleep1（旧方法，已过时）
+
+现在请直接用 [刷机包](https://github.com/CharlesGool/e5-openwrt-flasher)。下面是最早的 e5-sleep1 单独安装方法，留作参考。
 
 **只适用于** 用 2026-10-13 刷机包（OpenWrt 25.12.5，内核 e5-mobile4）安装到手机存储（userdata）的 E5。
 安装脚本会检查 boot_b 是否正是这个刷机包的镜像，不是就拒绝。
@@ -192,7 +179,16 @@ adb shell su -c sh /data/e5linux/restore-boot-b.sh
 
 ## 自己编译
 
-x86_64 Linux + Docker：
+现在用的是 [`build/build-e5.sh`](build/build-e5.sh)：在官方构建容器 `e5-mainline-build` 里按 e5-linux 的
+`device/linux_device_e5/prepare-kernel.py` 准备内核，再按 `SLEEP` 级别打补丁（1：0001–0003；2：+0004/0005；3：+0006；
+4：+0007；5：+0008；6：+0009）。e5-sleep8 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep8` 是 linux-lts-e5
+`020b970e3` 的 worktree）：
+
+```sh
+TOP=/path/to/e5-linux KBUILD_BUILD_USER=charles KBUILD_BUILD_HOST=e5 bash build/build-e5.sh sleep8 -e5-sleep8-charles 6
+```
+
+早期的独立脚本（e5-sleep1 / 2 / 4，x86_64 Linux + Docker，用 sprd-linux-devs 的公开源码）：
 
 ```sh
 bash build/build-e5-sleep1.sh ./work          # 约 5 分钟（20 核）

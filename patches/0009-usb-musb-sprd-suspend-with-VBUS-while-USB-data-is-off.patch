@@ -1,0 +1,33 @@
+From: CharlesGool <gzcheng0822@gmail.com>
+Subject: [PATCH] usb: musb: sprd: suspend with VBUS while USB data is off
+
+In device mode the controller refused system suspend while VBUS was there,
+so a plugged-in E5 never slept, even with USB data off (the "USB off" mode:
+usb_data_enabled 0, the charger possibly in HiZ).  With data off nothing
+uses the port: suspend as without VBUS (controller, PHY and USB3.1 PLL off).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+--- a/drivers/usb/musb/musb_sprd.c	2026-10-17 11:08:00.875929048 +0000
++++ b/drivers/usb/musb/musb_sprd.c	2026-10-17 11:08:00.875929048 +0000
+@@ -2654,10 +2654,19 @@
+ 	if (musb_sprd_lowpower_configuration_onoff(glue, 1))
+ 		return 0;
+ #else
+-	if (glue->vbus_active && glue->dr_mode == USB_DR_MODE_PERIPHERAL) {
++	/*
++	 * e5: with USB data off (usb_control/usb_data_enabled 0) nothing uses the
++	 * port -- VBUS only charges, or not even that with the charger in HiZ --
++	 * so suspend as without VBUS: the controller and PHY off, the USB3.1 PLL
++	 * released.  Writing 1 again runs the state machine (resume_work).
++	 */
++	if (glue->vbus_active && glue->dr_mode == USB_DR_MODE_PERIPHERAL &&
++	    glue->usb_data_enabled != 0) {
+ 		dev_info(glue->dev, "Abort PM suspend in device mode!!\n");
+ 		return -EBUSY;
+ 	}
++	if (glue->vbus_active && glue->dr_mode == USB_DR_MODE_PERIPHERAL)
++		dev_info(glue->dev, "PM suspend with VBUS: USB data is off\n");
+ 
+ 	if (!glue->enable_pm_suspend_in_host && glue->dr_mode == USB_DR_MODE_HOST) {
+ 		dev_info(glue->dev, "Abort PM suspend in host mode!!\n");

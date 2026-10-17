@@ -1,0 +1,62 @@
+From: CharlesGool <gzcheng0822@gmail.com>
+Subject: [PATCH] power: supply: ump96xx-fgu: relax_cnt_threshold module parameter
+
+The sleep calibration's relax counter counts every 4 s while the battery
+current stays under 30 mA; at the device tree's 580 it wakes a sleeping
+E5 every 2320 s to read the OCV.  A module parameter, relax_cnt_threshold
+(default 8191, the register's 13 bits: about 9 h; 0 for the device
+tree's), read at each suspend.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+diff --git a/drivers/power/supply/sprd_ump96xx_fuel_gauge.c b/drivers/power/supply/sprd_ump96xx_fuel_gauge.c
+index e87bf5b..21eeada 100644
+--- a/drivers/power/supply/sprd_ump96xx_fuel_gauge.c
++++ b/drivers/power/supply/sprd_ump96xx_fuel_gauge.c
+@@ -1083,9 +1083,27 @@ static inline int ump96xx_fgu_set_relax_cnt_thre(struct sprd_fgu_info *info,
+ 				  relax_cnt_threshold >> UMP96XX_FGU_RELAX_CNT_THRE_SHITF);
+ }
+ 
++/*
++ * The relax counter of the sleep calibration counts every 4 s while the
++ * battery current stays under relax_cur_threshold; at its threshold the FGU
++ * wakes the system to read the open-circuit voltage.  The device tree's 580
++ * (sprd,relax-counter-threshold) wakes a sleeping E5 every 2320 s; this
++ * overrides it: 320..8191 (the register's 13 bits, about 9 h), or 0 for the
++ * device tree's.  Read at each suspend, so a write takes effect at the next.
++ */
++static unsigned int relax_cnt_threshold = 8191;
++module_param(relax_cnt_threshold, uint, 0644);
++MODULE_PARM_DESC(relax_cnt_threshold,
++		 "sleep calibration wake-up, in 4 s counts: 320..8191, 0 for the device tree's (default 8191, about 9 h)");
++
+ static int ump96xx_fgu_relax_mode_config(struct sprd_fgu_info *info)
+ {
+ 	int ret = 0;
++	int cnt_threshold = info->slp_cap_calib.relax_cnt_threshold;
++
++	if (relax_cnt_threshold)
++		cnt_threshold = clamp_t(int, relax_cnt_threshold, UMP96XX_FGU_RELAX_CNT_THRESHOLD,
++					UMP96XX_FGU_RELAX_CNT_THRE_MASK);
+ 
+ 	ret = ump96xx_fgu_set_relax_cur_thre(info, info->slp_cap_calib.relax_cur_threshold);
+ 	if (ret) {
+@@ -1093,7 +1111,7 @@ static int ump96xx_fgu_relax_mode_config(struct sprd_fgu_info *info)
+ 		return ret;
+ 	}
+ 
+-	ret = ump96xx_fgu_set_relax_cnt_thre(info, info->slp_cap_calib.relax_cnt_threshold);
++	ret = ump96xx_fgu_set_relax_cnt_thre(info, cnt_threshold);
+ 	if (ret) {
+ 		dev_err(info->dev, "Sleep calib Fail to set relax_cnt_thre, ret= %d\n", ret);
+ 		return ret;
+@@ -1105,7 +1123,8 @@ static int ump96xx_fgu_relax_mode_config(struct sprd_fgu_info *info)
+ 		return ret;
+ 	}
+ 
+-	dev_info(info->dev, "%s %d Sleep calib mode config done!!!\n", __func__, __LINE__);
++	dev_info(info->dev, "%s %d Sleep calib mode config done!!! (relax_cnt_th %d)\n",
++		 __func__, __LINE__, cnt_threshold);
+ 
+ 	return ret;
+ }
