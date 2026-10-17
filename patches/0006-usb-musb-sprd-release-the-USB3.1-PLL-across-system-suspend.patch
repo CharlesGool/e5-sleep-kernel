@@ -1,0 +1,79 @@
+From: CharlesGool <gzcheng0822@gmail.com>
+Date: Sat, 17 Oct 2026 13:10:00 +0800
+Subject: [PATCH 6/7] usb: musb: sprd: release the USB3.1 PLL across system
+ suspend
+
+musb_sprd forces the USB3.1 PLL (USB31PLLV) on at probe, because the USB2
+PHY takes its 26 MHz reference from it, and never lets go.  Chip-level sleep
+(PMU PAD_OUT_CHIP_SLEEP: the 26 MHz crystal off, the rails down) needs every
+PLL down, so with the force held the chip never got there: after 136
+suspends PAD_OUT_CHIP_SLEEP_EDG_CNT (PMU APB 0xf3c) still read 1, although
+the AP, PUB, modem, audio and sensor hub all reached deep sleep, and the
+board drew ~19 mA (~73 mW) asleep.  Stock Android, whose musb_sprd.ko turns
+the force on and off as needed, counts 1 -> 6 in a single short suspend.
+
+Device-mode system suspend only gets past musb_sprd_pm_suspend() with no
+VBUS, so nothing needs the PHY then: drop the force there and put it back
+before the PHY is resumed.
+
+Measured on the Rongyue E5 (OpenWrt, 60 s RTC suspends, the force dropped
+at syscore suspend): PAD_OUT_CHIP_SLEEP_EDG_CNT 1 -> 5 -> 8; USB enumerates
+normally after resume.
+---
+--- a/drivers/usb/musb/musb_sprd.c	2026-10-17 05:06:45.014393599 +0000
++++ b/drivers/usb/musb/musb_sprd.c	2026-10-17 05:06:45.014393599 +0000
+@@ -140,6 +140,7 @@
+ 	struct musb_reg_info		pubsys_bypass;
+ 	struct musb_reg_info		suspend_clk_src_frc_on;
+ 	struct musb_reg_info		usb31pllv_frc_on;
++	bool				usb31pllv_released;
+ 	struct usb_role_switch		*role_sw;
+ 
+ 	enum usb_role			role;
+@@ -2623,6 +2624,24 @@
+ 	}
+ }
+ 
++/*
++ * The USB3.1 PLL is forced on at probe for the USB2 PHY's reference clock,
++ * and a PLL that is forced on keeps the whole chip out of chip-level sleep
++ * (PMU PAD_OUT_CHIP_SLEEP needs every PLL down): with it held, the board
++ * stays at ~19 mA in suspend where it could go far lower.  Device-mode system
++ * suspend only gets this far with no VBUS, so nothing needs the PHY then;
++ * the force goes back on before the PHY is resumed.
++ */
++static void musb_sprd_usb31pllv_frc(struct sprd_glue *glue, bool on)
++{
++	struct musb_reg_info *r = &glue->usb31pllv_frc_on;
++
++	if (!r->regmap_ptr)
++		return;
++	regmap_update_bits(r->regmap_ptr, r->args[0], r->args[1],
++			   on ? r->args[1] : 0);
++}
++
+ static int musb_sprd_pm_suspend(struct device *dev)
+ {
+ 	struct sprd_glue *glue = dev_get_drvdata(dev);
+@@ -2663,6 +2682,9 @@
+ 	musb_sprd_suspend(glue);
+ 	atomic_set(&glue->pm_suspended, 1);
+ 
++	musb_sprd_usb31pllv_frc(glue, false);
++	glue->usb31pllv_released = true;
++
+ 	return 0;
+ }
+ 
+@@ -2691,6 +2713,11 @@
+ 		return 0;
+ 	}
+ 
++	if (glue->usb31pllv_released) {
++		musb_sprd_usb31pllv_frc(glue, true);
++		glue->usb31pllv_released = false;
++	}
++
+ 	musb_sprd_resume(glue);
+ 	atomic_set(&glue->pm_suspended, 0);
+ 

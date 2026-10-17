@@ -4,6 +4,7 @@
 #   build/build-e5-sleep1.sh [WORK]          (default WORK: ./work)
 #   REF=1 build/build-e5-sleep1.sh           the e5-mobile4 kernel instead, unpatched (to compare)
 #   SLEEP2=1 build/build-e5-sleep1.sh        e5-sleep2: + patches 0004/0005, the camera power domain built in
+#   SLEEP4=1 build/build-e5-sleep1.sh        e5-sleep4: + patches 0006/0007 as well
 #
 # It is the official E5 kernel build (e5-linux device/linux_device_e5/build-kernel.sh:
 # prepare-kernel.py puts cpufreq v2 / the SIP service, OTG, charger and Wi-Fi fixes into
@@ -19,6 +20,7 @@ W=$(mkdir -p "${1:-$PWD/work}" && cd "${1:-$PWD/work}" && pwd)
 E5_LINUX_COMMIT=569f13d4ce15585f70817c2a1e03bb574a84720b
 KERNEL_COMMIT=020b970e351eee3887e6caaf2d653926e7086e44
 if [ "${REF:-}" = 1 ]; then NAME=ref LV=-e5-mobile4 SLEEP=0
+elif [ "${SLEEP4:-}" = 1 ]; then NAME=sleep4 LV=-e5-sleep4 SLEEP=4
 elif [ "${SLEEP2:-}" = 1 ]; then NAME=sleep2 LV=-e5-sleep2 SLEEP=2
 else NAME=sleep1 LV=-e5-sleep1 SLEEP=1; fi
 
@@ -35,7 +37,7 @@ if [ ! -d linux ]; then
 fi
 rm -rf "k-$NAME"; git -C linux worktree prune
 git -C linux worktree add -q --detach "$W/k-$NAME" $KERNEL_COMMIT
-cp "$HERE"/patches/000[1245]-*.patch "$W/"
+cp "$HERE"/patches/000[124567]-*.patch "$W/"
 docker image inspect e5-mainline-build >/dev/null 2>&1 || docker build -q -t e5-mainline-build e5-linux/upstream/
 
 # (mounted at its own path: the worktree's .git points there)
@@ -49,9 +51,13 @@ if [ "$SLEEP" != 0 ]; then
     patch -p1 -N < $W/0001-watchdog-ump9620-stop-across-system-suspend.patch
     patch -p1 -N < $W/0002-sprd-dpu-no-cancel-of-uninitialised-wb-work.patch
 fi
-if [ "$SLEEP" = 2 ]; then
+if [ "$SLEEP" -ge 2 ]; then
     patch -p1 -N < $W/0004-drm-panfrost-sprd-power-the-GPU-off-across-system-su.patch
     patch -p1 -N < $W/0005-soc-sprd-add-the-UMS9621-camera-subsystem-power-doma.patch
+fi
+if [ "$SLEEP" -ge 4 ]; then
+    patch -p1 -N < $W/0006-usb-musb-sprd-release-the-USB3.1-PLL-across-system-suspend.patch
+    patch -p1 -N < $W/0007-usb-musb-sprd-do-not-poll-while-USB-data-is-disabled.patch
 fi
 python3 - $TOP $O/features.config "$LV" "$SLEEP" <<PY
 from pathlib import Path
@@ -66,9 +72,9 @@ for key in ("SCSI", "BLK_DEV_SD", "USB_STORAGE", "USB_UAS", "EXFAT_FS", "NTFS3_F
             "USB_NET_AX88179_178A", "USB_NET_CDCETHER", "USB_NET_CDC_NCM",
             "USB_NET_RNDIS_HOST", "USB_NET_SMSC75XX", "USB_NET_SMSC95XX"):
     text += "\nCONFIG_" + key + "=m"
-if sleep in ("1", "2"):
+if sleep in ("1", "2", "4"):
     text += "\nCONFIG_CPU_IDLE=y\nCONFIG_CPU_IDLE_GOV_MENU=y\nCONFIG_CPU_IDLE_GOV_TEO=y\nCONFIG_ARM_PSCI_CPUIDLE=y"
-if sleep == "2":
+if sleep in ("2", "4"):
     text += "\nCONFIG_SPRD_CAMSYS_PD=y"
 output.write_text(text + "\n")
 PY

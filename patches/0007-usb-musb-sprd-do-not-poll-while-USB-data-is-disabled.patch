@@ -1,0 +1,31 @@
+From: CharlesGool <gzcheng0822@gmail.com>
+Date: Sat, 17 Oct 2026 14:40:00 +0800
+Subject: [PATCH 7/7] usb: musb: sprd: do not poll while USB data is disabled
+
+With /sys/class/usb_notify/usb_control/usb_data_enabled at 0 (the stock
+"disable USB data", used for a charge-only USB port) the state machine
+stayed in DRD_STATE_IDLE and requeued itself every 200 ms, cable or not:
+five wakeups a second, each logging "sm_work: idle state", for as long as
+data stays off.  Nothing needs the poll: usb_data_enabled_store() queues
+resume_work when the switch changes, and resume_work runs the state
+machine again through musb_sprd_ext_event_notify(), as a cable event does.
+So wait there instead.
+---
+--- a/drivers/usb/musb/musb_sprd.c	2026-10-17 06:26:13.226691442 +0000
++++ b/drivers/usb/musb/musb_sprd.c	2026-10-17 06:26:13.226691442 +0000
+@@ -1958,12 +1958,12 @@
+ 		fallthrough;
+ 	case DRD_STATE_IDLE:
+ 		/* if /sys/class/usb_notify/usb_control/usb_data_enabled is
+-		 * 0, don't setup usb connection.
++		 * 0, don't setup usb connection.  Nothing to poll for: setting
++		 * it back to 1 queues resume_work, which runs this again, as a
++		 * cable event does.
+ 		 */
+ 		if (test_bit(B_DATA_DISABLED, &glue->inputs)) {
+ 			dev_dbg(glue->dev, "USB data disabled, wait\n");
+-			rework = true;
+-			delay = MUSB_DATA_ENABLE_CHECK_DELAY;
+ 			break;
+ 		}
+ 

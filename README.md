@@ -1,8 +1,8 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核：`6.18.54-e5-sleep1`，以及含全部修复和 7 个信息屏应用的完整刷机包 `e5-sleep2`（见下文“刷机包”）
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核：`6.18.54-e5-sleep1`，以及含全部修复和 7 个信息屏应用的完整刷机包 `e5-sleep4`（见下文“刷机包”）
 
-*A kernel for the Rongyue E5 running OpenWrt (e5-linux) that can sleep: the PMIC watchdog stopped across system suspend, CPU idle states, a display driver warning fixed, and the GPU and camera power domains off in suspend so the AP reaches PMU deep sleep*
+*A kernel for the Rongyue E5 running OpenWrt (e5-linux) that can sleep: the PMIC watchdog stopped across system suspend, CPU idle states, a display driver warning fixed, the GPU and camera power domains off in suspend so the AP reaches PMU deep sleep, and the USB PLL released so the whole chip reaches chip-level sleep*
 
 在官方 E5 内核 `6.18.54-e5-mobile4`（e5-linux 2026-10-13 刷机包）的基础上：
 
@@ -13,8 +13,11 @@
 | [0003](patches/0003-e5-mainline-config-cpuidle.patch) CPU 空闲状态 | 原内核 `CONFIG_CPU_IDLE` 未开，空闲核心只会 WFI；厂商设备树里的 PSCI 核心 / 簇断电状态（core-sleep、cluster-pd）现在能用了 |
 | [0004](patches/0004-drm-panfrost-sprd-power-the-GPU-off-across-system-su.patch) 挂起时关 GPU | panfrost 的展锐胶水层只在 probe 时给 GPU 上电，挂起时不断电，GPU 电源域、GPLL、GPU DCDC 整夜开着 |
 | [0005](patches/0005-soc-sprd-add-the-UMS9621-camera-subsystem-power-doma.patch) 相机电源域 | 新驱动 `sprd_camsys_pd`：引导程序留下上电的相机域开机即强制关断，有设备用时才开 |
+| [0006](patches/0006-usb-musb-sprd-release-the-USB3.1-PLL-across-system-suspend.patch) 挂起时释放 USB PLL | musb 驱动开机就把 USB3.1 PLL 设成强制开启且从不释放，整颗芯片因此进不了芯片级休眠 |
+| [0007](patches/0007-usb-musb-sprd-do-not-poll-while-USB-data-is-disabled.patch) USB 数据关闭时不轮询 | 原厂“禁用 USB 数据”开关为 0 时，musb 状态机每 200 毫秒醒一次空转 |
 
-0004 和 0005 合起来让 AP 子系统在挂起时真正进入 PMU 深睡（见下文“AP 深睡”）。
+0004 和 0005 合起来让 AP 子系统在挂起时真正进入 PMU 深睡（见下文“AP 深睡”）；0006 再让整颗芯片进入芯片级休眠
+（关 26 MHz 晶振、降压，见下文“芯片级休眠”）。
 
 配合[热点省电](https://github.com/CharlesGool/e5-hotspot-saver) v2.5 的深度休眠使用（关热点、熄屏后系统挂起到内存）。
 
@@ -27,22 +30,24 @@
   热点省电的 sleep.sh 仍在挂起前后停 / 启看门狗，两者叠加无害。
 - 休眠电流尚未长时间实测。
 
-## 刷机包：E5 深度休眠版（e5-sleep2）
+## 刷机包：E5 深度休眠版（e5-sleep4）
 
-**下载：[Openwrt_E5_Flasher_sleep2.zip](https://github.com/CharlesGool/e5-sleep-kernel/releases/download/e5-sleep2/Openwrt_E5_Flasher_sleep2.zip)**（164 MB，
-[Release 页面](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep2)）
-SHA-256 `a042e325360b48bd2bb22d56cc8d0a490d37d79e2d66b5e106fdf7ad6215be6d`
+**下载：[Openwrt_E5_Flasher_sleep4.zip](https://github.com/CharlesGool/e5-sleep-kernel/releases/download/e5-sleep4/Openwrt_E5_Flasher_sleep4.zip)**（164 MB，
+[Release 页面](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep4)）
+SHA-256 `fa08627d879a2b80fa1f863180c7513889ed39ec9d0428258d0a0746219f7779`
+
+（上一版 [e5-sleep2](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/e5-sleep2) 只有 0001–0005，芯片进不了芯片级休眠，建议升级。）
 
 在官方 2026-10-13 刷机包（OpenWrt 25.12.5，e5-linux 359ae54）基础上改的完整刷机包，**只适用于 E5**：
 
-- 内核 `6.18.54-e5-sleep2`：官方构建流程编译，含 0001–0005 全部补丁，相机电源域驱动直接编进内核；
+- 内核 `6.18.54-e5-sleep4`：官方构建流程编译，含 0001–0007 全部补丁，相机电源域驱动直接编进内核；
 - 启动镜像：以官方 boot.img 为底，只换内核和 initramfs 里的 45 个模块；
 - 根文件系统：官方镜像，加新内核的模块、预装 7 个信息屏应用，SIM 状态时间戳改用 CLOCK_BOOTTIME；
-  镜像版本显示为 `359ae54+e5-sleep2`。
+  镜像版本显示为 `359ae54+e5-sleep4`。
 
 | 预装应用 | 版本 |
 |---|---|
-| [热点省电](https://github.com/CharlesGool/e5-hotspot-saver)（含熄屏深度休眠，默认开） | 2.6 |
+| [热点省电](https://github.com/CharlesGool/e5-hotspot-saver)（含熄屏深度休眠，默认开；CPU 关闭核心；USB 关闭（仅充电）） | 2.8 |
 | [底部导航](https://github.com/CharlesGool/e5-navbar) | 1.4 |
 | [禁用 IPv6](https://github.com/CharlesGool/e5-noipv6) | 1.0 |
 | [功率监测](https://github.com/CharlesGool/e5-powermon) | 1.2 |
@@ -59,8 +64,12 @@ SHA-256 `a042e325360b48bd2bb22d56cc8d0a490d37d79e2d66b5e106fdf7ad6215be6d`
 - **从 Android 切回 OpenWrt**：`flash.cmd --boot-openwrt`（原版包的这个命令会因 boot_b 哈希不同而拒绝），或 Magisk 切回模块。
 
 实测（`--update` 升级到本包）：91 个模块加载、0 失败、无 WARNING / Oops；应用都在，后台服务自动装好，原有设置保留；
-相机域开机即关；热点省电关掉射频后自己挂起 239 秒，AP 和 DDR 都进了深睡（PMU 深睡计数随挂起增加）。
-在同样修复下，休眠功耗由约 70 mW 降到 40 mW 以下。
+相机域开机即关；拔线挂起时 AP、DDR 进入深睡，整颗芯片进入芯片级休眠（PMU 计数随挂起增加）；
+USB 关闭（仅充电）切换、重启后保持、恢复均正常。
+
+关于功耗：只有 0001–0005 时（e5-sleep2），一整天的功率监测数据算出熄屏休眠约 19 mA（约 73 mW），
+每次休眠都很稳定——芯片级休眠没有发生，这正是 0006 修的问题。0006 之后的长时间休眠功耗还没有测完。
+（之前说的“降到 40 mW 以下”来自一段很短的观察，电量计 0.1% 的精度不够，不准确。）
 
 ## AP 深睡（0004、0005）
 
@@ -100,6 +109,31 @@ initramfs 的 `panfrost.ko` 换掉，把 `sprd_camsys_pd.ko` 放进 rootfs 的 `
 - [`tools/e5_pdbg`](tools/e5_pdbg)：TF-A 休眠现场探测模块，`/proc/e5_pdbg` 可读当前值
 - [`tools/apdeep-test.sh`](tools/apdeep-test.sh)：拔线后自动做“原样 / 关相机域 / 再换补丁 panfrost”三组挂起并记录计数器
 - [`tools/decode-regs.py`](tools/decode-regs.py)：用厂商寄存器头文件给 regmap debugfs 导出命名，可对比两份导出
+
+## 芯片级休眠（0006、0007）
+
+有了 0004、0005，AP、DDR、基带、音频、传感器都进了深睡，但 PMU 的芯片级休眠计数
+`PAD_OUT_CHIP_SLEEP_EDG_CNT`（`0x64910f3c`，芯片通知 PMIC 关晶振、降压的那根信号）在 136 次挂起后仍是 1，
+原厂安卓一次 2 秒的挂起就从 1 变成 6。芯片级休眠的条件（`PAD_OUT_CHIP_SLEEP_CFG`）里有一条是**所有 PLL 都断电**；
+对比两边的 `*_REL_CFG`，只有 USB3.1 PLL（`USB31PLLV_REL_CFG`，`0x64910a58`）在 OpenWrt 上是强制开启
+（`0x45`，安卓插着 USB 也是 `0x44`）：musb 驱动在 probe 时为 USB2 PHY 的 26 MHz 参考时钟把它设成强制开启，之后再也不放。
+
+0006 在 musb 的系统挂起里（设备模式只有没插线时才走得到这里）释放强制开启，恢复 PHY 前再打开。
+先用 [`tools/e5_pllfix`](tools/e5_pllfix) 在 syscore 挂起阶段做同样的事验证，再写成补丁：
+
+| 挂起（拔线，60 秒 RTC） | 芯片级休眠计数 | DDR 深睡计数 |
+|---|---|---|
+| 之前 136 次 | 一直是 1 | — |
+| e5_pllfix 第 1 次 | 1 → 5 | 35 → 39 |
+| e5_pllfix 第 2 次 | 5 → 8 | 39 → 42 |
+| 0006 内核 | 1 → 4 | 0 → 3 |
+
+唤醒后 USB 照常枚举。
+
+0007 配合[热点省电](https://github.com/CharlesGool/e5-hotspot-saver) v2.8 的“USB 关闭（仅充电）”：它用原厂内核的
+“禁用 USB 数据”开关（`/sys/class/usb_notify/usb_control/usb_data_enabled`），而开关为 0 时 musb 状态机每 200 毫秒
+醒一次空转、打一行日志，拔了线也一样。开关写回 1 时驱动本来就会重新跑状态机，所以 0007 让它停下等待，
+关闭 20 秒内不再有一次轮询（之前约 100 次）。
 
 ## 安装
 
@@ -152,6 +186,7 @@ x86_64 Linux + Docker：
 bash build/build-e5-sleep1.sh ./work          # 约 5 分钟（20 核）
 REF=1 bash build/build-e5-sleep1.sh ./work    # 不加补丁的 e5-mobile4，用来和设备上的比较
 SLEEP2=1 bash build/build-e5-sleep1.sh ./work # e5-sleep2：再加 0004、0005，相机电源域编进内核
+SLEEP4=1 bash build/build-e5-sleep1.sh ./work # e5-sleep4：再加 0006、0007
 python3 tools/repack-boot.py <刷机包>/files/boot.img work/dist-sleep1/Image.lk work/dist-sleep1/modules boot-e5-sleep1.img
 ```
 
@@ -163,7 +198,7 @@ Image.lk 同为 31262728 字节。
 `tools/repack-boot.py` 以刷机包的 boot.img 为底，只换内核和 initramfs 里的 45 个 `.ko`，
 init、busybox、f2fs 修复工具逐字节保留，vbmeta 和 AVB 尾部照搬（这台已解锁的设备不强制 AVB）。
 
-e5-sleep2 刷机包的根文件系统由 [`build/make-rootfs-sleep2.sh`](build/make-rootfs-sleep2.sh) 生成：解开官方 `openwrt.ext4.gz`，放入 e5-linux `upstream/stage-root-modules.py` 布局的新内核模块、按信息屏 `plugin install` 的规则装入 7 个应用、改 SIM 状态时间戳，再压缩回去。包里的 `boot.json`、`VERSION`、`SHA256SUMS` 随之更新，`flash.py` 等脚本与官方一致。
+刷机包的根文件系统由 [`build/make-rootfs-sleep4.sh`](build/make-rootfs-sleep4.sh)（e5-sleep2 时是 [`make-rootfs-sleep2.sh`](build/make-rootfs-sleep2.sh)）生成：解开官方 `openwrt.ext4.gz`，放入 e5-linux `upstream/stage-root-modules.py` 布局的新内核模块、按信息屏 `plugin install` 的规则装入 7 个应用、改 SIM 状态时间戳，再压缩回去。包里的 `boot.json`、`VERSION`、`SHA256SUMS` 随之更新，`flash.py` 等脚本与官方一致。
 
 ## 诊断工具
 
