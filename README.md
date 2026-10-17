@@ -44,8 +44,8 @@
 | `6.18.54-e5-sleep2` | 0001–0005 | |
 | `6.18.54-e5-sleep1` | 0001–0003 | |
 
-刷机包（e5-sleep2、e5-sleep4 曾在本仓库的 Release 里发布）从 e5-sleep8 起在
-[e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher) 发布。
+刷机包全部在 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher/releases) 发布
+（包括以前在本仓库发过的 e5-sleep2、e5-sleep4）。
 
 关于功耗：只有 0001–0005 时（e5-sleep2），一整天的功率监测数据算出熄屏休眠约 19 mA（约 73 mW），
 每次休眠都很稳定——芯片级休眠没有发生，这正是 0006 修的问题。0006 之后的长时间休眠功耗还没有测完。
