@@ -1,6 +1,6 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep8-charles`**（补丁 0001–0009，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8)）；e5-sleep10 刷机包另带 0010（只改 Wi-Fi 驱动模块，内核本身不变）。
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep12-charles`**（补丁 0001–0010，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12)）。
 
 **刷机包已移到单独的仓库 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)**（含这个内核、按上游 e5-linux 从源码重建的系统、信息屏应用、LuCI 网页升级）；本仓库只发内核。
 
@@ -39,7 +39,8 @@
 
 | 内核 | 补丁 | 说明 |
 |---|---|---|
-| `6.18.54-e5-sleep8-charles` | 0001–0009 | 当前版本；上游 e5-linux `bb8775e` 的内核适配，编译者 `charles@e5`。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8) |
+| `6.18.54-e5-sleep12-charles` | 0001–0010 | 当前版本；完整重编，0010 编进模块树，与 e5-sleep12 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12) |
+| `6.18.54-e5-sleep8-charles` | 0001–0009 | 上游 e5-linux `bb8775e` 的内核适配，编译者 `charles@e5`；e5-sleep10 / 11 刷机包在它上面单独替换了 0010 的 Wi-Fi 驱动模块。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8) |
 | `6.18.54-e5-sleep5-charles` | 0001–0008 | 第一个按 bb8775e 构建的版本 |
 | `6.18.54-e5-sleep4` | 0001–0007 | 官方 2026-10-13 刷机包的内核适配（e5-linux 359ae54） |
 | `6.18.54-e5-sleep2` | 0001–0005 | |
@@ -165,7 +166,7 @@ Wi-Fi 芯片（SC2355 / Marlin3，SDIO）在热点有流量时偶尔会固件断
 
 实测（`echo rebootmarlin > /proc/mdbg/at_cmd` 让芯片复位，另有一次客户端重连时的真实断言）：每次复位后约 2 秒热点重新启用，客户端自动重连。芯片刚复位后容易再崩一次，e5-sleep10 的恢复脚本因此不再“60 秒内不重试”，而是延后重试（见刷机包仓库）。
 
-0010 只改 `sprd_wlan_combo.ko`，vermagic 不变：可以用同一份构建树单独编这个模块，替换 rootfs 和 boot_b initramfs 里的同名文件。
+0010 只改 `sprd_wlan_combo.ko`，vermagic 不变：可以用同一份构建树单独编这个模块，替换 rootfs 和 boot_b initramfs 里的同名文件（e5-sleep10 / 11 就是这样做的）；e5-sleep12 起整个内核按 SLEEP=7 重编。
 
 ## 安装 e5-sleep1（旧方法，已过时）
 
@@ -216,11 +217,11 @@ adb shell su -c sh /data/e5linux/restore-boot-b.sh
 
 现在用的是 [`build/build-e5.sh`](build/build-e5.sh)：在官方构建容器 `e5-mainline-build` 里按 e5-linux 的
 `device/linux_device_e5/prepare-kernel.py` 准备内核，再按 `SLEEP` 级别打补丁（1：0001–0003；2：+0004/0005；3：+0006；
-4：+0007；5：+0008；6：+0009；7：+0010）。e5-sleep8 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep8` 是 linux-lts-e5
+4：+0007；5：+0008；6：+0009；7：+0010）。e5-sleep12 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep12` 是 linux-lts-e5
 `020b970e3` 的 worktree）：
 
 ```sh
-TOP=/path/to/e5-linux KBUILD_BUILD_USER=charles KBUILD_BUILD_HOST=e5 bash build/build-e5.sh sleep8 -e5-sleep8-charles 6
+TOP=/path/to/e5-linux KBUILD_BUILD_USER=charles KBUILD_BUILD_HOST=e5 bash build/build-e5.sh sleep12 -e5-sleep12-charles 7
 ```
 
 早期的独立脚本（e5-sleep1 / 2 / 4，x86_64 Linux + Docker，用 sprd-linux-devs 的公开源码）：
