@@ -3,7 +3,8 @@
 #   build-e5.sh NAME LOCALVERSION SLEEP(0|1)
 #   SLEEP=1: + the watchdog and DPU patches and cpuidle (/root/e5/in/kernel)
 #   TOP=<e5-linux checkout> (default /root/e5/e5-linux)
-#   SLEEP=3/4/5: + 0006 / + 0007 / + 0008 (fuel gauge relax_cnt_threshold)
+#   SLEEP=3/4/5/6: + 0006 / + 0007 / + 0008 (fuel gauge relax_cnt_threshold) / + 0009 (suspend with VBUS, data off)
+#   SLEEP=7: + 0010 (the Wi-Fi driver sends its firmware-reset uevent from the wiphy)
 #   SLEEP=2: SLEEP=1 + the GPU (0004) and camera power domain (0005) patches, camsys built in
 set -euo pipefail
 NAME=$1 LV=$2 SLEEP=$3
@@ -30,6 +31,12 @@ fi
 if [ "$SLEEP" -ge 5 ]; then
     patch -p1 -N < /root/e5/in/kernel/0008-power-supply-ump96xx-fgu-relax_cnt_threshold-module-parameter.patch
 fi
+if [ "$SLEEP" -ge 6 ]; then
+    patch -p1 -N < /root/e5/in/kernel/0009-usb-musb-sprd-suspend-with-VBUS-while-USB-data-is-off.patch
+fi
+if [ "$SLEEP" -ge 7 ]; then
+    patch -p1 -N < /root/e5/in/kernel/0010-sprd_wlan_combo-recovery-uevent-from-the-wiphy-device.patch
+fi
 python3 - $TOP $O/features.config "$LV" "$SLEEP" <<PY
 from pathlib import Path
 import sys
@@ -43,9 +50,9 @@ for key in ("SCSI", "BLK_DEV_SD", "USB_STORAGE", "USB_UAS", "EXFAT_FS", "NTFS3_F
             "USB_NET_AX88179_178A", "USB_NET_CDCETHER", "USB_NET_CDC_NCM",
             "USB_NET_RNDIS_HOST", "USB_NET_SMSC75XX", "USB_NET_SMSC95XX"):
     text += "\nCONFIG_" + key + "=m"
-if sleep in ("1", "2", "3", "4", "5"):
+if sleep in ("1", "2", "3", "4", "5", "6"):
     text += "\nCONFIG_CPU_IDLE=y\nCONFIG_CPU_IDLE_GOV_MENU=y\nCONFIG_CPU_IDLE_GOV_TEO=y\nCONFIG_ARM_PSCI_CPUIDLE=y"
-if sleep in ("2", "3", "4", "5"):
+if sleep in ("2", "3", "4", "5", "6"):
     text += "\nCONFIG_SPRD_CAMSYS_PD=y"
 output.write_text(text + "\n")
 PY

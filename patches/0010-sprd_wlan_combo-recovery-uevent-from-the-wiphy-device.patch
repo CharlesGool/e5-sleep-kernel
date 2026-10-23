@@ -1,0 +1,22 @@
+From: Charles <charles@e5>
+Subject: [PATCH] sprd_wlan_combo: send the SC2355 recovery uevent from the wiphy device
+
+wiphy_dev() is the wiphy's parent, the sprd-marlin3:wlan platform device: the
+KOBJ_CHANGE with SC2355_RECOVERY=1 came as SUBSYSTEM=platform and never reached
+/etc/hotplug.d/ieee80211/90-sc2355-recovery, which waits for an ieee80211/phyN
+DEVPATH.  After a WCN firmware assert the radio was then never reopened: the
+driver stayed at hif->exit, the AP up but silent.  Send it from the wiphy
+device itself (SUBSYSTEM=ieee80211, DEVPATH .../ieee80211/phyN).
+
+---
+--- a/drivers/unisoc_platform/sprd_wlan_combo/common/cfg80211.c
++++ b/drivers/unisoc_platform/sprd_wlan_combo/common/cfg80211.c
+@@ -275,7 +275,7 @@
+ 		if (hif->report_try == 1) {
+ 			char *env[] = { "SC2355_RECOVERY=1", NULL };
+ 
+-			kobject_uevent_env(&wiphy_dev(priv->wiphy)->kobj,
++			kobject_uevent_env(&priv->wiphy->dev.kobj,
+ 					   KOBJ_CHANGE, env);
+ 		}
+ 		wl_info("Try to report assert a %d time \n", hif->report_try);
