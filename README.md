@@ -1,6 +1,6 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep8-charles`**（补丁 0001–0009，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8)）。
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep8-charles`**（补丁 0001–0009，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8)）；e5-sleep10 刷机包另带 0010（只改 Wi-Fi 驱动模块，内核本身不变）。
 
 **刷机包已移到单独的仓库 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)**（含这个内核、按上游 e5-linux 从源码重建的系统、信息屏应用、LuCI 网页升级）；本仓库只发内核。
 
@@ -19,6 +19,7 @@
 | [0007](patches/0007-usb-musb-sprd-do-not-poll-while-USB-data-is-disabled.patch) USB 数据关闭时不轮询 | 原厂“禁用 USB 数据”开关为 0 时，musb 状态机每 200 毫秒醒一次空转 |
 | [0008](patches/0008-power-supply-ump96xx-fgu-relax_cnt_threshold-module-parameter.patch) 电量计休眠校准唤醒 | 电量计的休眠校准每 2320 秒（设备树 580 × 4 秒）把系统唤醒一次读开路电压；模块参数 `relax_cnt_threshold` 默认 8191（约 9 小时），写 0 恢复设备树的值 |
 | [0009](patches/0009-usb-musb-sprd-suspend-with-VBUS-while-USB-data-is-off.patch) USB 数据关闭时插着线也能挂起 | 设备模式下有 VBUS 时 musb 拒绝系统挂起；USB 数据关闭（`usb_data_enabled` 为 0）时端口没人用，按没插线处理：关控制器、PHY，释放 USB PLL |
+| [0010](patches/0010-sprd_wlan_combo-recovery-uevent-from-the-wiphy-device.patch) Wi-Fi 芯片崩溃后自动恢复 | Wi-Fi 芯片固件断言复位后，驱动发出的恢复事件发错了设备（`wiphy_dev()` 是父设备），系统的恢复脚本收不到，热点一直“开着但搜不到”；改为从 wiphy 自身发出，约 2 秒内自动重开 |
 
 0004 和 0005 合起来让 AP 子系统在挂起时真正进入 PMU 深睡（见下文“AP 深睡”）；0006 再让整颗芯片进入芯片级休眠
 （关 26 MHz 晶振、降压，见下文“芯片级休眠”）。
@@ -156,6 +157,16 @@ USB 数据关闭时（原厂“禁用 USB 数据”开关 `usb_data_enabled` 为
 同时充电芯片保持 HiZ、由电池供电），端口没有任何用途：0009 让它照没插线时那样挂起——控制器和 PHY 断电、
 释放 USB PLL（0006），日志 `PM suspend with VBUS: USB data is off`。开关写回 1 时状态机照常重新运行。
 
+## Wi-Fi 芯片崩溃后自动恢复（0010）
+
+Wi-Fi 芯片（SC2355 / Marlin3，SDIO）在热点有流量时偶尔会固件断言（如 `fw assert: [CMD] CMD_GET_STATION, [REASON] CMD_RSP_TIMEOUT_ERROR`，或客户端刚连上时的 `WCN Assert in host_if_sdio.c line 58`），内核随即复位芯片。驱动要等 Wi-Fi 被关闭、重新打开才能恢复，在那之前一直报 `can not get msg: hif->exit`、`NETDEV WATCHDOG`：热点看起来开着，实际不发信号。
+
+上游 e5-linux（2026-10-16）为此让驱动在复位后发一个 `SC2355_RECOVERY=1` 的 uevent，由 `/etc/hotplug.d/ieee80211/90-sc2355-recovery` 执行 `wifi down` / `wifi up`。但驱动用的是 `kobject_uevent_env(&wiphy_dev(priv->wiphy)->kobj, …)`，而 `wiphy_dev()` 返回的是 wiphy 的**父设备**（平台设备 `sprd-marlin3:wlan`）：事件以 `SUBSYSTEM=platform` 发出，到不了 `hotplug.d/ieee80211`，脚本从没运行过（上游的单元测试把 `wiphy_dev()` 桩成了返回自身）。0010 改为 `&priv->wiphy->dev.kobj`，事件以 `SUBSYSTEM=ieee80211`、`DEVPATH=…/ieee80211/phyN` 发出。
+
+实测（`echo rebootmarlin > /proc/mdbg/at_cmd` 让芯片复位，另有一次客户端重连时的真实断言）：每次复位后约 2 秒热点重新启用，客户端自动重连。芯片刚复位后容易再崩一次，e5-sleep10 的恢复脚本因此不再“60 秒内不重试”，而是延后重试（见刷机包仓库）。
+
+0010 只改 `sprd_wlan_combo.ko`，vermagic 不变：可以用同一份构建树单独编这个模块，替换 rootfs 和 boot_b initramfs 里的同名文件。
+
 ## 安装 e5-sleep1（旧方法，已过时）
 
 现在请直接用 [刷机包](https://github.com/CharlesGool/e5-openwrt-flasher)。下面是最早的 e5-sleep1 单独安装方法，留作参考。
@@ -205,7 +216,7 @@ adb shell su -c sh /data/e5linux/restore-boot-b.sh
 
 现在用的是 [`build/build-e5.sh`](build/build-e5.sh)：在官方构建容器 `e5-mainline-build` 里按 e5-linux 的
 `device/linux_device_e5/prepare-kernel.py` 准备内核，再按 `SLEEP` 级别打补丁（1：0001–0003；2：+0004/0005；3：+0006；
-4：+0007；5：+0008；6：+0009）。e5-sleep8 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep8` 是 linux-lts-e5
+4：+0007；5：+0008；6：+0009；7：+0010）。e5-sleep8 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep8` 是 linux-lts-e5
 `020b970e3` 的 worktree）：
 
 ```sh
