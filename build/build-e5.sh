@@ -50,9 +50,9 @@ for key in ("SCSI", "BLK_DEV_SD", "USB_STORAGE", "USB_UAS", "EXFAT_FS", "NTFS3_F
             "USB_NET_AX88179_178A", "USB_NET_CDCETHER", "USB_NET_CDC_NCM",
             "USB_NET_RNDIS_HOST", "USB_NET_SMSC75XX", "USB_NET_SMSC95XX"):
     text += "\nCONFIG_" + key + "=m"
-if sleep in ("1", "2", "3", "4", "5", "6"):
+if int(sleep) >= 1:
     text += "\nCONFIG_CPU_IDLE=y\nCONFIG_CPU_IDLE_GOV_MENU=y\nCONFIG_CPU_IDLE_GOV_TEO=y\nCONFIG_ARM_PSCI_CPUIDLE=y"
-if sleep in ("2", "3", "4", "5", "6"):
+if int(sleep) >= 2:
     text += "\nCONFIG_SPRD_CAMSYS_PD=y"
 output.write_text(text + "\n")
 PY
