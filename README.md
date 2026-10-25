@@ -1,6 +1,6 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep12-charles`**（补丁 0001–0010，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12)）。
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep13-charles`**（补丁 0001–0011，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep13)）。
 
 **刷机包已移到单独的仓库 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)**（含这个内核、按上游 e5-linux 从源码重建的系统、信息屏应用、LuCI 网页升级）；本仓库只发内核。
 
@@ -20,6 +20,7 @@
 | [0008](patches/0008-power-supply-ump96xx-fgu-relax_cnt_threshold-module-parameter.patch) 电量计休眠校准唤醒 | 电量计的休眠校准每 2320 秒（设备树 580 × 4 秒）把系统唤醒一次读开路电压；模块参数 `relax_cnt_threshold` 默认 8191（约 9 小时），写 0 恢复设备树的值 |
 | [0009](patches/0009-usb-musb-sprd-suspend-with-VBUS-while-USB-data-is-off.patch) USB 数据关闭时插着线也能挂起 | 设备模式下有 VBUS 时 musb 拒绝系统挂起；USB 数据关闭（`usb_data_enabled` 为 0）时端口没人用，按没插线处理：关控制器、PHY，释放 USB PLL |
 | [0010](patches/0010-sprd_wlan_combo-recovery-uevent-from-the-wiphy-device.patch) Wi-Fi 芯片崩溃后自动恢复 | Wi-Fi 芯片固件断言复位后，驱动发出的恢复事件发错了设备（`wiphy_dev()` 是父设备），系统的恢复脚本收不到，热点一直“开着但搜不到”；改为从 wiphy 自身发出，约 2 秒内自动重开 |
+| [0011](patches/0011-charger-manager-set-the-fuel-gauge-to-full-at-the-end-of-a-charge.patch) 充满时电量校准到 100% | 上游 charger-manager 的 `is_full_charged()` 在容量判断后直接返回，后面“电压到满电值、电流降到截止值就把电量计设为满”的代码从不执行：电量计一旦估偏（比如取过电池），充满了也只显示五六十。现在插着电时电压 ≥ 满电电压（4.33 V）、0 ≤ 电流 ≤ 120 mA 保持 60 秒，就把电量计设为满（`POWER_SUPPLY_PROP_CALIBRATE`）；不碰充电开关，HiZ 停充时电流为负不会误触发。实测：电量计故意设成 50%，恢复充电后 61 秒校准回 100% |
 
 0004 和 0005 合起来让 AP 子系统在挂起时真正进入 PMU 深睡（见下文“AP 深睡”）；0006 再让整颗芯片进入芯片级休眠
 （关 26 MHz 晶振、降压，见下文“芯片级休眠”）。
@@ -39,7 +40,8 @@
 
 | 内核 | 补丁 | 说明 |
 |---|---|---|
-| `6.18.54-e5-sleep12-charles` | 0001–0010 | 当前版本；完整重编，0010 编进模块树，与 e5-sleep12 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12) |
+| `6.18.54-e5-sleep13-charles` | 0001–0011 | 当前版本；加 0011（充满时把电量计校准到 100%），与 e5-sleep13 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep13) |
+| `6.18.54-e5-sleep12-charles` | 0001–0010 | 完整重编，0010 编进模块树，与 e5-sleep12 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12) |
 | `6.18.54-e5-sleep8-charles` | 0001–0009 | 上游 e5-linux `bb8775e` 的内核适配，编译者 `charles@e5`；e5-sleep10 / 11 刷机包在它上面单独替换了 0010 的 Wi-Fi 驱动模块。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8) |
 | `6.18.54-e5-sleep5-charles` | 0001–0008 | 第一个按 bb8775e 构建的版本 |
 | `6.18.54-e5-sleep4` | 0001–0007 | 官方 2026-10-13 刷机包的内核适配（e5-linux 359ae54） |
@@ -217,11 +219,11 @@ adb shell su -c sh /data/e5linux/restore-boot-b.sh
 
 现在用的是 [`build/build-e5.sh`](build/build-e5.sh)：在官方构建容器 `e5-mainline-build` 里按 e5-linux 的
 `device/linux_device_e5/prepare-kernel.py` 准备内核，再按 `SLEEP` 级别打补丁（1：0001–0003；2：+0004/0005；3：+0006；
-4：+0007；5：+0008；6：+0009；7：+0010）。e5-sleep12 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep12` 是 linux-lts-e5
+4：+0007；5：+0008；6：+0009；7：+0010；8：+0011）。e5-sleep13 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep13` 是 linux-lts-e5
 `020b970e3` 的 worktree）：
 
 ```sh
-TOP=/path/to/e5-linux KBUILD_BUILD_USER=charles KBUILD_BUILD_HOST=e5 bash build/build-e5.sh sleep12 -e5-sleep12-charles 7
+TOP=/path/to/e5-linux KBUILD_BUILD_USER=charles KBUILD_BUILD_HOST=e5 bash build/build-e5.sh sleep13 -e5-sleep13-charles 8
 ```
 
 早期的独立脚本（e5-sleep1 / 2 / 4，x86_64 Linux + Docker，用 sprd-linux-devs 的公开源码）：

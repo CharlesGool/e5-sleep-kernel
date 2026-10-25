@@ -1,0 +1,78 @@
+From: CharlesGool <gzcheng0822@gmail.com>
+Subject: [PATCH 0011] power: supply: charger-manager: set the fuel gauge to full at the end of a charge
+
+is_full_charged() returns right after its capacity check, so the full check by
+battery voltage and current after it -- the one that also sets the fuel gauge
+to full -- is dead code.  A gauge that has drifted low (the battery taken out,
+a wrong first estimate) then stays low through a whole charge: the charger
+terminates at 4.37 V and 7 mA while the capacity reads 57 %.
+
+From cm_batt_works(), with external power: when the battery has stayed at or
+above fullbatt_uV with 0 <= ibat <= fullbatt_uA (4.33 V and 120 mA on the E5)
+for 60 s and the capacity is under 100 %, set the gauge to full
+(POWER_SUPPLY_PROP_CALIBRATE, as that check did) and force_set_full so the
+displayed capacity climbs to 100 %.  Charging itself is not touched; a charge
+stopped by the charger's HiZ (e5-charge's limit) has ibat < 0 and never
+matches.
+
+---
+--- a/drivers/power/supply/charger-manager.c
++++ b/drivers/power/supply/charger-manager.c
+@@ -1004,6 +1004,48 @@
+ 		dev_err(cm->dev, "failed to adjust fuel cap\n");
+ 
+ 	return ret;
++}
++
++/*
++ * e5: is_full_charged() returns from its capacity check, so the full check by
++ * voltage and current below it, which also sets the fuel gauge to full, never
++ * runs: a gauge that has drifted low (after the battery was out, say) stays
++ * low through a full charge -- the charger terminated at 4.37 V and the gauge
++ * at 57 %.  Do only that part: with external power, once the battery has
++ * stayed at or above fullbatt_uV with 0 <= ibat <= fullbatt_uA for
++ * CM_E5_FULL_HOLD_S, set the gauge to full and let the capacity follow
++ * (force_set_full, as that check did).  Charging is left alone: the charger
++ * terminates by itself, and a charge stopped by HiZ has ibat < 0.
++ */
++#define CM_E5_FULL_HOLD_S	60
++static time64_t cm_e5_full_since;
++
++static void cm_e5_full_calibrate(struct charger_manager *cm)
++{
++	struct charger_desc *desc = cm->desc;
++	time64_t now = ktime_get_boottime_seconds();
++	int uV, uA;
++
++	if (desc->cap >= CM_CAP_FULL_PERCENT || !desc->fullbatt_uV || !desc->fullbatt_uA ||
++	    !is_ext_pwr_online(cm) || !is_batt_present(cm) ||
++	    get_vbat_now_uV(cm, &uV) || get_ibat_now_uA(cm, &uA) ||
++	    uV < (int)desc->fullbatt_uV || uA < 0 || uA > (int)desc->fullbatt_uA) {
++		cm_e5_full_since = 0;
++		return;
++	}
++
++	if (!cm_e5_full_since) {
++		cm_e5_full_since = now;
++		return;
++	}
++	if (now - cm_e5_full_since < CM_E5_FULL_HOLD_S)
++		return;
++
++	dev_info(cm->dev, "e5: full (%d uV, %d uA for %lld s) at cap %d: fuel gauge set to full\n",
++		 uV, uA, (long long)(now - cm_e5_full_since), desc->cap);
++	cm_e5_full_since = 0;
++	if (!adjust_fuel_cap(cm, CM_FORCE_SET_FUEL_CAP_FULL))
++		desc->force_set_full = true;
+ }
+ 
+ /**
+@@ -8120,6 +8162,8 @@
+ 		last_fuel_cap = fuel_cap;
+ 
+ 	cur_time = ktime_to_timespec64(ktime_get_boottime());
++
++	cm_e5_full_calibrate(cm);
+ 
+ 	if (is_full_charged(cm))
+ 		cm->battery_status = POWER_SUPPLY_STATUS_FULL;

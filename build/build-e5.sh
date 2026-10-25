@@ -5,6 +5,7 @@
 #   TOP=<e5-linux checkout> (default /root/e5/e5-linux)
 #   SLEEP=3/4/5/6: + 0006 / + 0007 / + 0008 (fuel gauge relax_cnt_threshold) / + 0009 (suspend with VBUS, data off)
 #   SLEEP=7: + 0010 (the Wi-Fi driver sends its firmware-reset uevent from the wiphy)
+#   SLEEP=8: + 0011 (charger-manager sets the fuel gauge to full at the end of a charge)
 #   SLEEP=2: SLEEP=1 + the GPU (0004) and camera power domain (0005) patches, camsys built in
 set -euo pipefail
 NAME=$1 LV=$2 SLEEP=$3
@@ -36,6 +37,9 @@ if [ "$SLEEP" -ge 6 ]; then
 fi
 if [ "$SLEEP" -ge 7 ]; then
     patch -p1 -N < /root/e5/in/kernel/0010-sprd_wlan_combo-recovery-uevent-from-the-wiphy-device.patch
+fi
+if [ "$SLEEP" -ge 8 ]; then
+    patch -p1 -N < /root/e5/in/kernel/0011-charger-manager-set-the-fuel-gauge-to-full-at-the-end-of-a-charge.patch
 fi
 python3 - $TOP $O/features.config "$LV" "$SLEEP" <<PY
 from pathlib import Path
