@@ -1,12 +1,14 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep13-charles`**（补丁 0001–0011，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep13)）。
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep14-charles`**（上游新内核基线 `e5-6.18` + 补丁 0006–0010，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep14)）。
 
 **刷机包已移到单独的仓库 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)**（含这个内核、按上游 e5-linux 从源码重建的系统、信息屏应用、LuCI 网页升级）；本仓库只发内核。
 
 *A kernel for the Rongyue E5 running OpenWrt (e5-linux) that can sleep: the PMIC watchdog stopped across system suspend, CPU idle states, a display driver warning fixed, the GPU and camera power domains off in suspend so the AP reaches PMU deep sleep, the USB PLL released so the whole chip reaches chip-level sleep, the fuel gauge's sleep-calibration wake-up once in about 9 h instead of every 2320 s, and suspend with USB plugged in while USB data is off. Flash packages: [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher).*
 
-官方 E5 内核构建流程（linux-lts-e5 `020b970e351e`，e5-sleep5 起是上游 e5-linux `bb8775e` 的内核适配：显示 / eMMC DMA / EIC / 温度 / SIPA / 电量计 / Wi-Fi SAE）加以下补丁：
+> **e5-sleep14 起**，内核基线换成上游 [sprd-linux-devs/linux](https://github.com/sprd-linux-devs/linux) `e5-6.18`（`b93bbc3a`，随 e5-linux `5ac9d504`）：上游已经收录了 0001、0002、0004、0005（注明基于本仓库 e5-sleep2，相机电源域驱动由上游重写）、0003 的 cpuidle 配置和 0011 的满电校准，本仓库只再加 **0006–0010**（`build/build-e5.sh` 的 `SLEEP=9`）。下表的 0001–0005、0011 留作 e5-sleep13 及以前版本的记录。
+
+e5-sleep13 及以前：官方 E5 内核构建流程（linux-lts-e5 `020b970e351e`，e5-sleep5 起是上游 e5-linux `bb8775e` 的内核适配：显示 / eMMC DMA / EIC / 温度 / SIPA / 电量计 / Wi-Fi SAE）加以下补丁：
 
 | 改动 | 说明 |
 |---|---|
@@ -40,7 +42,8 @@
 
 | 内核 | 补丁 | 说明 |
 |---|---|---|
-| `6.18.54-e5-sleep13-charles` | 0001–0011 | 当前版本；加 0011（充满时把电量计校准到 100%），与 e5-sleep13 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep13) |
+| `6.18.54-e5-sleep14-charles` | 上游 e5-6.18 + 0006–0010 | 当前版本；内核基线换成上游 `e5-6.18`（b93bbc3a，已含 0001–0005 和满电校准），版本号不再带 git 后缀，与 e5-sleep14 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep14) |
+| `6.18.54-e5-sleep13-charles` | 0001–0011 | 加 0011（充满时把电量计校准到 100%），与 e5-sleep13 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep13) |
 | `6.18.54-e5-sleep12-charles` | 0001–0010 | 完整重编，0010 编进模块树，与 e5-sleep12 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12) |
 | `6.18.54-e5-sleep8-charles` | 0001–0009 | 上游 e5-linux `bb8775e` 的内核适配，编译者 `charles@e5`；e5-sleep10 / 11 刷机包在它上面单独替换了 0010 的 Wi-Fi 驱动模块。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8) |
 | `6.18.54-e5-sleep5-charles` | 0001–0008 | 第一个按 bb8775e 构建的版本 |

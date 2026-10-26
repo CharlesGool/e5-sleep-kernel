@@ -6,6 +6,9 @@
 #   SLEEP=3/4/5/6: + 0006 / + 0007 / + 0008 (fuel gauge relax_cnt_threshold) / + 0009 (suspend with VBUS, data off)
 #   SLEEP=7: + 0010 (the Wi-Fi driver sends its firmware-reset uevent from the wiphy)
 #   SLEEP=8: + 0011 (charger-manager sets the fuel gauge to full at the end of a charge)
+#   SLEEP=9: the sprd-linux-devs/linux e5-6.18 base (b93bbc3a+, TOP at e5-linux 5ac9d504+): 0001-0005 and the
+#            full-charge check (0011) are upstream there; + 0006-0010.  The release has no SCM suffix
+#            (upstream: LOCALVERSION_AUTO=n): 6.18.54<LOCALVERSION>
 #   SLEEP=2: SLEEP=1 + the GPU (0004) and camera power domain (0005) patches, camsys built in
 set -euo pipefail
 NAME=$1 LV=$2 SLEEP=$3
@@ -14,7 +17,13 @@ set -euo pipefail
 TOP=${TOP:-/root/e5/e5-linux} K=/root/e5/k-$NAME O=/root/e5/obj-$NAME DEST=/root/e5/dist-$NAME
 mkdir -p $O $DEST/modules
 cd $K
+# (SLEEP=9: the committed kernel baseline, as upstream checks it -- on the clean checkout, before the model adapter)
+[ "$SLEEP" -lt 9 ] || python3 $TOP/upstream/check-kernel-source.py .
 python3 $TOP/device/linux_device_e5/prepare-kernel.py $K
+if [ "$SLEEP" -ge 9 ]; then
+    export LOCALVERSION=
+    for p in 0006 0007 0008 0009 0010; do patch -p1 -N < /root/e5/in/kernel/$p-*.patch; done
+else
 if [ "$SLEEP" != 0 ]; then
     patch -p1 -N < /root/e5/in/kernel/0001-watchdog-ump9620-stop-across-system-suspend.patch
     patch -p1 -N < /root/e5/in/kernel/0002-sprd-dpu-no-cancel-of-uninitialised-wb-work.patch
@@ -40,6 +49,7 @@ if [ "$SLEEP" -ge 7 ]; then
 fi
 if [ "$SLEEP" -ge 8 ]; then
     patch -p1 -N < /root/e5/in/kernel/0011-charger-manager-set-the-fuel-gauge-to-full-at-the-end-of-a-charge.patch
+fi
 fi
 python3 - $TOP $O/features.config "$LV" "$SLEEP" <<PY
 from pathlib import Path
