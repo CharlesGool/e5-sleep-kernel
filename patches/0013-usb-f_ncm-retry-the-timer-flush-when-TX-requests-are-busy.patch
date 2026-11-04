@@ -1,0 +1,32 @@
+From 8a5d12097cfe38f9d631163e36a4557d28fccb45 Mon Sep 17 00:00:00 2001
+From: charles <gzcheng0822@gmail.com>
+Date: Sun, 1 Nov 2026 07:38:32 +0000
+Subject: [PATCH] usb: gadget: f_ncm: retry the timer flush when TX requests
+ are busy
+
+Based on Cosmin Tanislav's linux-usb patch of 2026-08-17 (as adapted in
+e5-linux devices/common/usb-ncm.py).
+---
+ drivers/usb/gadget/function/f_ncm.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/gadget/function/f_ncm.c b/drivers/usb/gadget/function/f_ncm.c
+index cc43568..f6e71d9 100644
+--- a/drivers/usb/gadget/function/f_ncm.c
++++ b/drivers/usb/gadget/function/f_ncm.c
+@@ -1158,7 +1158,11 @@ static enum hrtimer_restart ncm_tx_timeout(struct hrtimer *data)
+ 		 *
+ 		 * This will call directly into u_ether's eth_start_xmit()
+ 		 */
+-		netdev->netdev_ops->ndo_start_xmit(NULL, netdev);
++		/* A timer flush has no qdisc to retry a busy USB request. */
++		if (netdev->netdev_ops->ndo_start_xmit(NULL, netdev) == NETDEV_TX_BUSY) {
++			hrtimer_forward_now(data, TX_TIMEOUT_NSECS);
++			return HRTIMER_RESTART;
++		}
+ 	}
+ 	return HRTIMER_NORESTART;
+ }
+-- 
+2.34.1
+

@@ -9,6 +9,7 @@
 #   SLEEP=9: the sprd-linux-devs/linux e5-6.18 base (b93bbc3a+, TOP at e5-linux 5ac9d504+): 0001-0005 and the
 #            full-charge check (0011) are upstream there; + 0006-0010.  The release has no SCM suffix
 #            (upstream: LOCALVERSION_AUTO=n): 6.18.54<LOCALVERSION>
+#   SLEEP=10: SLEEP=9 + 0012 (ST7365P dithering) 0013 (f_ncm timer retry) 0014 (SC2355 BA rearm)
 #   SLEEP=2: SLEEP=1 + the GPU (0004) and camera power domain (0005) patches, camsys built in
 set -euo pipefail
 NAME=$1 LV=$2 SLEEP=$3
@@ -23,6 +24,8 @@ python3 $TOP/device/linux_device_e5/prepare-kernel.py $K
 if [ "$SLEEP" -ge 9 ]; then
     export LOCALVERSION=
     for p in 0006 0007 0008 0009 0010; do patch -p1 -N < /root/e5/in/kernel/$p-*.patch; done
+    # (SLEEP=10: + the E5 panel dithering, the NCM timer retry and the SC2355 BA rearm, adapted from e5-linux 441839bd)
+    if [ "$SLEEP" -ge 10 ]; then for p in 0012 0013 0014; do patch -p1 -N < /root/e5/in/kernel/$p-*.patch; done; fi
 else
 if [ "$SLEEP" != 0 ]; then
     patch -p1 -N < /root/e5/in/kernel/0001-watchdog-ump9620-stop-across-system-suspend.patch

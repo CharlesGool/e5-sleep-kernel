@@ -1,0 +1,757 @@
+From d008c9d35b72ca74e5ec2d24ac14699613c46fd4 Mon Sep 17 00:00:00 2001
+From: charles <gzcheng0822@gmail.com>
+Date: Sun, 1 Nov 2026 07:38:32 +0000
+Subject: [PATCH] wifi: sprd_wlan_combo: SC2355 block-ack rearm and nonblocking
+ admission
+
+Per-peer BA ownership (ba_lock, generations, pending/rearm) so that BA
+negotiation recovers across topology changes, failures and cancelled work.
+Adapted from e5-linux devices/common/wifi-ba.py (kanoqwq, 2026-10-30).
+---
+ .../sprd_wlan_combo/common/cfg80211.c         |   2 +
+ .../sprd_wlan_combo/common/delay_work.c       |   4 +
+ .../sprd_wlan_combo/common/delay_work.h       |   1 +
+ .../sprd_wlan_combo/common/hif.h              |  16 +-
+ .../sprd_wlan_combo/sc2355/ba-recovery.h      | 157 ++++++++++++
+ .../sprd_wlan_combo/sc2355/reorder.c          |  12 +-
+ .../sprd_wlan_combo/sc2355/sdio.c             |  85 +++---
+ .../sprd_wlan_combo/sc2355/tx.c               | 241 ++++++++++--------
+ 8 files changed, 349 insertions(+), 169 deletions(-)
+ create mode 100644 drivers/unisoc_platform/sprd_wlan_combo/sc2355/ba-recovery.h
+
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/common/cfg80211.c b/drivers/unisoc_platform/sprd_wlan_combo/common/cfg80211.c
+index 9822417..5a2e441 100755
+--- a/drivers/unisoc_platform/sprd_wlan_combo/common/cfg80211.c
++++ b/drivers/unisoc_platform/sprd_wlan_combo/common/cfg80211.c
+@@ -182,6 +182,8 @@ static void cfg80211_do_work(struct work_struct *work)
+ 			break;
+ 		}
+ 
++		if (sprd_work->release)
++			sprd_work->release(sprd_work);
+ 		kfree(sprd_work);
+ 	}
+ }
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.c b/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.c
+index ca6af06..50f1c0d 100644
+--- a/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.c
++++ b/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.c
+@@ -38,6 +38,8 @@ void sprd_cancel_work(struct sprd_priv *priv, struct sprd_vif *vif)
+ 	list_for_each_entry_safe(sprd_work, pos, &priv->work_list, list) {
+ 		if (vif == sprd_work->vif) {
+ 			list_del(&sprd_work->list);
++			if (sprd_work->release)
++				sprd_work->release(sprd_work);
+ 			kfree(sprd_work);
+ 		}
+ 	}
+@@ -55,6 +57,8 @@ void sprd_clean_work(struct sprd_priv *priv)
+ 	spin_lock_bh(&priv->work_lock);
+ 	list_for_each_entry_safe(sprd_work, pos, &priv->work_list, list) {
+ 		list_del(&sprd_work->list);
++		if (sprd_work->release)
++			sprd_work->release(sprd_work);
+ 		kfree(sprd_work);
+ 	}
+ 	spin_unlock_bh(&priv->work_lock);
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.h b/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.h
+index 231c3d8..e24a992 100755
+--- a/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.h
++++ b/drivers/unisoc_platform/sprd_wlan_combo/common/delay_work.h
+@@ -52,6 +52,7 @@ struct sprd_work {
+ 	enum sprd_hif_type hw_type;
+ 	u8 id;
+ 	u32 len;
++	void (*release)(struct sprd_work *work);
+ 	u8 data[];
+ };
+ 
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/common/hif.h b/drivers/unisoc_platform/sprd_wlan_combo/common/hif.h
+index 4205e79..627c94c 100644
+--- a/drivers/unisoc_platform/sprd_wlan_combo/common/hif.h
++++ b/drivers/unisoc_platform/sprd_wlan_combo/common/hif.h
+@@ -96,7 +96,7 @@ struct sprd_peer_entry {
+ 	unsigned long ba_tx_done_map;
+ 	u8 vowifi_enabled;
+ 	u8 vowifi_pkt_cnt;
+-	s64 time[6 + 1];
++	s64 time[8];
+ #ifdef ENABLE_PAM_WIFI
+ 	struct sprd_vif *vif;
+ #endif
+@@ -173,6 +173,14 @@ struct sprd_hif {
+ 	/* Manage rx function */
+ 	void *rx_mgmt;
+ 
++	/* SC2355 BA ownership: protected by ba_lock, never held over CP IO. */
++	spinlock_t ba_lock;
++	u64 ba_generation[MAX_LUT_NUM];
++	unsigned long ba_pending[MAX_LUT_NUM];
++	unsigned long ba_rearm[MAX_LUT_NUM];
++	s64 ba_last_admit;
++	bool ba_gate_valid;
++
+ 	struct sprd_peer_entry peer_entry[MAX_LUT_NUM];
+ 	unsigned long tx_num[MAX_LUT_NUM];
+ 
+@@ -350,6 +358,12 @@ static inline void sprd_hif_power_off(struct sprd_hif *hif)
+ 
+ static inline int sprd_hif_init(struct sprd_hif *hif)
+ {
++	spin_lock_init(&hif->ba_lock);
++	memset(hif->ba_generation, 0, sizeof(hif->ba_generation));
++	memset(hif->ba_pending, 0, sizeof(hif->ba_pending));
++	memset(hif->ba_rearm, 0, sizeof(hif->ba_rearm));
++	hif->ba_gate_valid = false;
++	hif->ba_last_admit = 0;
+ 	return hif->ops->init(hif);
+ }
+ 
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/sc2355/ba-recovery.h b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/ba-recovery.h
+new file mode 100644
+index 0000000..5727989
+--- /dev/null
++++ b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/ba-recovery.h
+@@ -0,0 +1,157 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SC2355_BA_RECOVERY_H
++#define SC2355_BA_RECOVERY_H
++
++#include "tx.h"
++#include "common/delay_work.h"
++
++/* Private work metadata: only request, never generation/ctx, goes to CP. */
++struct sc2355_ba_work {
++	struct host_addba_param request;
++	u64 generation;
++	u8 ctx_id;
++};
++
++static inline bool sc2355_ba_ap(struct sprd_vif *vif)
++{
++	return vif->mode == SPRD_MODE_AP || vif->mode == SPRD_MODE_P2P_GO;
++}
++
++static inline bool sc2355_ba_stagger(struct sprd_hif *hif, struct sprd_vif *vif)
++{
++	int i, peers = 0;
++
++	if (!sc2355_ba_ap(vif))
++		return false;
++	for (i = 0; i < MAX_LUT_NUM; i++) {
++		struct sprd_peer_entry *peer = &hif->peer_entry[i];
++
++		if (peer->ctx_id == vif->ctx_id && peer->ht_enable &&
++		    peer->vowifi_enabled != 1 && is_valid_ether_addr(peer->tx.da) &&
++		    ++peers > 1)
++			return true;
++	}
++	return false;
++}
++
++/* All *_locked helpers require hif->ba_lock. No firmware waits under it. */
++static inline void sc2355_ba_reset_locked(struct sprd_hif *hif, u8 lut)
++{
++	hif->ba_generation[lut]++;
++	hif->ba_pending[lut] = 0;
++	hif->ba_rearm[lut] = 0;
++	hif->peer_entry[lut].ba_tx_done_map = 0;
++}
++
++static inline void sc2355_ba_reset(struct sprd_hif *hif, u8 lut)
++{
++	if (lut >= MAX_LUT_NUM)
++		return;
++	spin_lock_bh(&hif->ba_lock);
++	sc2355_ba_reset_locked(hif, lut);
++	spin_unlock_bh(&hif->ba_lock);
++}
++
++static inline bool sc2355_ba_identity(struct sprd_hif *hif,
++				     struct sc2355_ba_work *work)
++{
++	u8 lut = work->request.lut_index;
++	u8 tid = work->request.addba_param.tid;
++	struct sprd_peer_entry *peer;
++
++	if (lut >= MAX_LUT_NUM || tid >= 8)
++		return false;
++	peer = &hif->peer_entry[lut];
++	return hif->ba_generation[lut] == work->generation &&
++		peer->ctx_id == work->ctx_id &&
++		ether_addr_equal(peer->tx.da, work->request.perr_mac_addr);
++}
++
++static inline bool sc2355_ba_matches(struct sprd_hif *hif,
++				     struct sc2355_ba_work *work)
++{
++	return sc2355_ba_identity(hif, work) &&
++		test_bit(work->request.addba_param.tid,
++			 &hif->ba_pending[work->request.lut_index]);
++}
++
++static inline bool sc2355_ba_ready(struct sprd_hif *hif, struct sprd_vif *vif,
++				  struct sc2355_ba_work *work, s64 now)
++{
++	u8 lut = work->request.lut_index, tid = work->request.addba_param.tid;
++	struct sprd_peer_entry *peer;
++
++	if (!sc2355_ba_identity(hif, work) || vif->ctx_id != work->ctx_id)
++		return false;
++	peer = &hif->peer_entry[lut];
++	return peer->ht_enable && peer->vowifi_enabled != 1 &&
++		!test_bit(tid, &peer->ba_tx_done_map) &&
++		!test_bit(tid, &hif->ba_pending[lut]) &&
++		!((vif->mode == SPRD_MODE_STATION || vif->mode == SPRD_MODE_P2P_CLIENT) &&
++		  !peer->ip_acquired) &&
++		(!peer->time[tid] || now - peer->time[tid] > 3000000000LL) &&
++		(!sc2355_ba_stagger(hif, vif) || !hif->ba_gate_valid ||
++		 now - hif->ba_last_admit >= 120000000LL);
++}
++
++static inline void sc2355_ba_finish(struct sprd_hif *hif,
++				  struct sc2355_ba_work *work, bool accepted)
++{
++	u8 lut = work->request.lut_index;
++	u8 tid = work->request.addba_param.tid;
++
++	spin_lock_bh(&hif->ba_lock);
++	if (sc2355_ba_matches(hif, work)) {
++		clear_bit(tid, &hif->ba_pending[lut]);
++		if (!accepted || test_bit(tid, &hif->ba_rearm[lut]))
++			clear_bit(tid, &hif->peer_entry[lut].ba_tx_done_map);
++		else
++			set_bit(tid, &hif->peer_entry[lut].ba_tx_done_map);
++		clear_bit(tid, &hif->ba_rearm[lut]);
++	}
++	spin_unlock_bh(&hif->ba_lock);
++}
++
++static inline void sc2355_ba_release_work(struct sprd_work *work)
++{
++	if (work->len == sizeof(struct sc2355_ba_work))
++		sc2355_ba_finish(&work->vif->priv->hif,
++				  (struct sc2355_ba_work *)work->data, false);
++}
++
++static inline void sc2355_ba_topology(struct sprd_vif *vif)
++{
++	struct sprd_hif *hif = &vif->priv->hif;
++	int i;
++
++	if (!sc2355_ba_ap(vif))
++		return;
++	spin_lock_bh(&hif->ba_lock);
++	if (!sc2355_ba_stagger(hif, vif)) {
++		spin_unlock_bh(&hif->ba_lock);
++		return;
++	}
++	for (i = 0; i < MAX_LUT_NUM; i++) {
++		struct sprd_peer_entry *peer = &hif->peer_entry[i];
++
++		if (peer->ctx_id != vif->ctx_id || !peer->ht_enable ||
++		    peer->vowifi_enabled == 1 || !is_valid_ether_addr(peer->tx.da))
++			continue;
++		/* V4 rearm, scoped to this AP. In-flight attempts finish first. */
++		hif->ba_rearm[i] |= hif->ba_pending[i];
++		peer->ba_tx_done_map &= hif->ba_pending[i];
++	}
++	spin_unlock_bh(&hif->ba_lock);
++}
++
++static inline void sc2355_ba_deltxba(struct sprd_hif *hif, u8 lut, u8 tid)
++{
++	if (lut >= MAX_LUT_NUM || tid >= 8)
++		return;
++	spin_lock_bh(&hif->ba_lock);
++	clear_bit(tid, &hif->peer_entry[lut].ba_tx_done_map);
++	if (test_bit(tid, &hif->ba_pending[lut]))
++		set_bit(tid, &hif->ba_rearm[lut]);
++	spin_unlock_bh(&hif->ba_lock);
++}
++#endif
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/sc2355/reorder.c b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/reorder.c
+index 915af72..bc24bf3 100644
+--- a/drivers/unisoc_platform/sprd_wlan_combo/sc2355/reorder.c
++++ b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/reorder.c
+@@ -10,6 +10,7 @@
+ #include "qos.h"
+ #include "reorder.h"
+ #include "rx.h"
++#include "ba-recovery.h"
+ 
+ static void reorder_ba_timeout(struct timer_list *t);
+ static void reorder_send_delba(struct rx_ba_entry *ba_entry,
+@@ -927,8 +928,6 @@ void sc2355_wlan_ba_session_event(struct sprd_hif *hif, unsigned char *data,
+ 	struct evt_ba *ba_event = (struct evt_ba *)data;
+ 	unsigned char type = ba_event->type;
+ 	int ret = 0;
+-	struct sprd_peer_entry *peer_entry = NULL;
+-	u8 qos_index;
+ 
+ 	if (ba_event->sta_lut_index >= MAX_LUT_NUM) {
+ 		wl_err("%s, error sta_lut_index %d!\n", __func__, ba_event->sta_lut_index);
+@@ -953,14 +952,7 @@ void sc2355_wlan_ba_session_event(struct sprd_hif *hif, unsigned char *data,
+ 		reorder_wlan_filter_event(ba_entry, ba_event);
+ 		break;
+ 	case SPRD_DELTXBA_EVENT:
+-		peer_entry = &hif->peer_entry[ba_event->sta_lut_index];
+-		qos_index = sc2355_qos_tid_map_to_index(ba_event->tid);
+-		peer_entry = &hif->peer_entry[ba_event->sta_lut_index];
+-		if (test_and_clear_bit
+-		    (ba_event->tid, &peer_entry->ba_tx_done_map))
+-			wl_info("%s, %d, deltxba, lut=%d, tid=%d, map=%lu\n",
+-				__func__, __LINE__, ba_event->sta_lut_index,
+-				ba_event->tid, peer_entry->ba_tx_done_map);
++		sc2355_ba_deltxba(hif, ba_event->sta_lut_index, ba_event->tid);
+ 		break;
+ 	default:
+ 		wl_err("%s: Error type: %d\n", __func__, type);
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/sc2355/sdio.c b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/sdio.c
+index d6dab16..5e2636c 100644
+--- a/drivers/unisoc_platform/sprd_wlan_combo/sc2355/sdio.c
++++ b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/sdio.c
+@@ -19,6 +19,7 @@
+ #include "txrx.h"
+ #include "cpu_performance.h"
+ #include "defrag.h"
++#include "ba-recovery.h"
+ 
+ #define SPRD_NORMAL_MEM	0
+ #define SPRD_DEFRAG_MEM	1
+@@ -736,47 +737,33 @@ int sc2355_push_link(struct sprd_hif *hif, int chn,
+  */
+ void sc2355_event_sta_lut(struct sprd_vif *vif, u8 *data, u16 len)
+ {
+-	struct sprd_hif *hif;
+-	struct evt_sta_lut_ind *sta_lut = NULL;
++	struct sprd_hif *hif = &vif->priv->hif;
++	struct evt_sta_lut_ind *sta_lut = (void *)data;
++	struct sprd_peer_entry *peer;
++	bool changed;
+ 	u8 i;
+ 
+-	if (len < sizeof(*sta_lut)) {
+-		wl_err("%s, len:%d too short!\n", __func__, len);
+-		return;
+-	}
+-	hif = &vif->priv->hif;
+-	sta_lut = (struct evt_sta_lut_ind *)data;
+-	if (hif != sc2355_get_hif()) {
+-		wl_err("%s, wrong hif!\n", __func__);
++	if (!data || len < sizeof(*sta_lut) || hif != sc2355_get_hif())
+ 		return;
+-	}
+-	if (!sta_lut) {
+-		wl_err("%s, NULL input data!\n", __func__);
+-		return;
+-	}
+-
+ 	i = sta_lut->sta_lut_index;
+-	if (i >= MAX_LUT_NUM) {
+-		wl_err("%s, error sta_lut_index %d!\n", __func__, i);
++	if (i >= MAX_LUT_NUM)
+ 		return;
+-	}
+-
+-	wl_info("ctx_id:%d,action:%d,lut:%d\n", sta_lut->ctx_id,
+-		sta_lut->action, sta_lut->sta_lut_index);
++	peer = &hif->peer_entry[i];
++	wl_info("ctx_id:%d,action:%d,lut:%d\n", sta_lut->ctx_id, sta_lut->action, i);
+ 	switch (sta_lut->action) {
+ 	case DEL_LUT_INDEX:
+-		if (hif->peer_entry[i].ba_tx_done_map != 0) {
+-			hif->peer_entry[i].ht_enable = 0;
+-			hif->peer_entry[i].ip_acquired = 0;
+-			hif->peer_entry[i].ba_tx_done_map = 0;
+-			/*sc2355_tx_delba(hif, hif->peer_entry + i);*/
+-		}
++		spin_lock_bh(&hif->ba_lock);
++		sc2355_ba_reset_locked(hif, i);
++		peer->ht_enable = 0;
++		peer->ip_acquired = 0;
++		spin_unlock_bh(&hif->ba_lock);
+ 		sc2355_defrag_recover(vif, i);
+ 		sc2355_peer_entry_delba(hif, i);
+-		memset(&hif->peer_entry[i], 0x00,
+-		       sizeof(struct sprd_peer_entry));
+-		hif->peer_entry[i].ctx_id = 0xFF;
++		spin_lock_bh(&hif->ba_lock);
++		memset(peer, 0, sizeof(*peer));
++		peer->ctx_id = 0xff;
+ 		hif->tx_num[i] = 0;
++		spin_unlock_bh(&hif->ba_lock);
+ 		sc2355_dis_flush_txlist(hif, i);
+ 		break;
+ 	case UPD_LUT_INDEX:
+@@ -784,26 +771,32 @@ void sc2355_event_sta_lut(struct sprd_vif *vif, u8 *data, u16 len)
+ 		sc2355_dis_flush_txlist(hif, i);
+ 		fallthrough;
+ 	case ADD_LUT_INDEX:
+-		hif->peer_entry[i].lut_index = i;
+-		hif->peer_entry[i].ctx_id = sta_lut->ctx_id;
+-		hif->peer_entry[i].ht_enable = sta_lut->is_ht_enable;
+-		hif->peer_entry[i].vht_enable = sta_lut->is_vht_enable;
+-		hif->peer_entry[i].ba_tx_done_map = 0;
++		spin_lock_bh(&hif->ba_lock);
++		changed = peer->ctx_id != sta_lut->ctx_id ||
++			!ether_addr_equal(peer->tx.da, sta_lut->ra) ||
++			peer->ht_enable != sta_lut->is_ht_enable ||
++			peer->vht_enable != sta_lut->is_vht_enable;
++		sc2355_ba_reset_locked(hif, i);
++		if (changed)
++			memset(peer->time, 0, sizeof(peer->time));
++		peer->lut_index = i;
++		peer->ctx_id = sta_lut->ctx_id;
++		peer->ht_enable = sta_lut->is_ht_enable;
++		peer->vht_enable = sta_lut->is_vht_enable;
+ 		hif->tx_num[i] = 0;
+-
++		ether_addr_copy(peer->tx.da, sta_lut->ra);
++		spin_unlock_bh(&hif->ba_lock);
+ #ifdef CONFIG_SPRD_WLAN_DEBUG
+-		wl_info("ctx_id%d,action%d,lut%d,%x:%x:%x:%x:%x:%x\n",
+-			sta_lut->ctx_id, sta_lut->action,
+-			sta_lut->sta_lut_index,
+-			sta_lut->ra[0], sta_lut->ra[1], sta_lut->ra[2],
+-			sta_lut->ra[3], sta_lut->ra[4], sta_lut->ra[5]);
++		wl_info("ctx_id%d,action%d,lut%d,%pM\n", sta_lut->ctx_id,
++			sta_lut->action, i, sta_lut->ra);
+ #else
+ 		wl_info("ctx_id%d,action%d,lut%d,%x:%x:%x:%x:xx:xx\n",
+-			sta_lut->ctx_id, sta_lut->action,
+-			sta_lut->sta_lut_index, sta_lut->ra[0], sta_lut->ra[1],
+-			sta_lut->ra[2], sta_lut->ra[3]);
++			sta_lut->ctx_id, sta_lut->action, i, sta_lut->ra[0],
++			sta_lut->ra[1], sta_lut->ra[2], sta_lut->ra[3]);
+ #endif
+-		ether_addr_copy(hif->peer_entry[i].tx.da, sta_lut->ra);
++		/* Stable firmware UPDATEs must not disturb the other clients. */
++		if (changed && vif->ctx_id == sta_lut->ctx_id)
++			sc2355_ba_topology(vif);
+ 		break;
+ 	default:
+ 		break;
+diff --git a/drivers/unisoc_platform/sprd_wlan_combo/sc2355/tx.c b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/tx.c
+index 1e41d32..3024197 100755
+--- a/drivers/unisoc_platform/sprd_wlan_combo/sc2355/tx.c
++++ b/drivers/unisoc_platform/sprd_wlan_combo/sc2355/tx.c
+@@ -14,6 +14,7 @@
+ #include "txrx.h"
+ #include "cpu_performance.h"
+ #include "wcn_bus.h"
++#include "ba-recovery.h"
+ 
+ #define MAX_FW_TX_DSCR	(1024)
+ 
+@@ -551,50 +552,16 @@ static void tx_flush_all_txlist(struct tx_mgmt *tx_dev)
+ }
+ 
+ void sc2355_tx_prepare_addba(struct sprd_hif *hif, unsigned char lut_index,
+-			     struct sprd_peer_entry *peer_entry,
+-			     unsigned char tid)
++			     struct sprd_peer_entry *peer_entry, unsigned char tid)
+ {
+-	if (hif->tx_num[lut_index] > 9 &&
+-	    peer_entry &&
+-	    peer_entry->ht_enable &&
+-	    peer_entry->vowifi_enabled != 1 &&
+-	    !test_bit(tid, &peer_entry->ba_tx_done_map)) {
+-		s64 time, time_diffms;
+-		struct sprd_vif *vif;
+-
+-		vif = sc2355_ctxid_to_vif(hif->priv, peer_entry->ctx_id);
+-		if (!vif) {
+-			wl_err("can not get vif base peer_entry ctx id\n");
+-			return;
+-		}
+-
+-		if (vif->mode == SPRD_MODE_STATION ||
+-		    vif->mode == SPRD_MODE_P2P_CLIENT) {
+-			if (!peer_entry->ip_acquired) {
+-				sprd_put_vif(vif);
+-				return;
+-			}
+-		}
+-
+-		time = sprd_get_ktime();
+-		time_diffms = div_s64((time - peer_entry->time[tid]), 1000000);
+-		/*need to delay 3s if priv addba failed */
+-		if (time_diffms > 3000 ||
+-		    peer_entry->time[tid] == 0) {
+-			wl_info("%s, %d, tx_addba, tid=%d\n", __func__,
+-				__LINE__, tid);
+-			peer_entry->time[tid] = sprd_get_ktime();
+-			if (!test_and_set_bit(tid, &peer_entry->ba_tx_done_map)) {
+-				if (hif->fw_power_down == 1) {
+-					wl_info("%s wakeup fw before tx_addba\n", __func__);
+-					hif->fw_power_down = 0;
+-					sc2355_work_host_wakeup_fw(vif);
+-				}
+-				sc2355_tx_addba(hif, peer_entry, tid);
+-			}
+-		}
+-		sprd_put_vif(vif);
+-	}
++	if (lut_index >= MAX_LUT_NUM || tid >= 8 ||
++	    peer_entry != &hif->peer_entry[lut_index] ||
++	    hif->tx_num[lut_index] <= 9 || !peer_entry->ht_enable ||
++	    peer_entry->vowifi_enabled == 1 ||
++	    test_bit(tid, &peer_entry->ba_tx_done_map) ||
++	    test_bit(tid, &hif->ba_pending[lut_index]))
++		return;
++	sc2355_tx_addba(hif, peer_entry, tid);
+ }
+ 
+ static int tx_prepare_tx_msg(struct sprd_hif *hif, struct sprd_msg *msg)
+@@ -989,7 +956,7 @@ static int tx_filter_ip_pkt(struct sk_buff *skb, struct net_device *ndev)
+ 			lut_index = sc2355_find_lut_index(hif, vif, skb->data);
+ 			hif->peer_entry[lut_index].ip_acquired = 1;
+ 			if (*dhcpdata == 0x03 && sc2355_is_group(skb->data))
+-				hif->peer_entry[lut_index].ba_tx_done_map = 0;
++				sc2355_ba_reset(hif, lut_index);
+ 		}
+ 	} else if (IPV6_DHCP(ethhdr, udphdr)) {
+ 		is_ipv6_dhcp = true;
+@@ -1711,7 +1678,7 @@ int sc2355_reset(struct sprd_hif *hif)
+ 		if (hif->peer_entry[i].ba_tx_done_map != 0) {
+ 			hif->peer_entry[i].ht_enable = 0;
+ 			hif->peer_entry[i].ip_acquired = 0;
+-			hif->peer_entry[i].ba_tx_done_map = 0;
++			sc2355_ba_reset(hif, i);
+ 		}
+ 		sc2355_peer_entry_delba(hif, i);
+ 		memset(&hif->peer_entry[i], 0x00,
+@@ -1844,7 +1811,7 @@ int sc2355_reset_self(struct sprd_priv *priv)
+ 		if (hif->peer_entry[i].ba_tx_done_map != 0) {
+ 			hif->peer_entry[i].ht_enable = 0;
+ 			hif->peer_entry[i].ip_acquired = 0;
+-			hif->peer_entry[i].ba_tx_done_map = 0;
++			sc2355_ba_reset(hif, i);
+ 		}
+ 		sc2355_peer_entry_delba(hif, i);
+ 		memset(&hif->peer_entry[i], 0x00,
+@@ -2283,38 +2250,85 @@ int sc2355_needed_headroom(struct sprd_priv *priv)
+ void sc2355_tx_addba(struct sprd_hif *hif,
+ 		     struct sprd_peer_entry *peer_entry, unsigned char tid)
+ {
+-#define WIN_SIZE 64
+-	struct host_addba_param addba;
+-	struct sprd_work *misc_work;
++	struct sc2355_ba_work saved, *payload;
++	struct host_addba_param *addba = &saved.request;
++	struct sprd_work *work;
+ 	struct sprd_vif *vif;
+-	u8 *work_data = NULL;
++	s64 now;
++	u8 lut;
++	bool ready;
+ 
+-	vif = sc2355_ctxid_to_vif(hif->priv, peer_entry->ctx_id);
+-	if (!vif)
++	if (tid >= 8 || !peer_entry)
+ 		return;
+-	memset(&addba, 0x0, sizeof(struct host_addba_param));
+-
+-	addba.lut_index = peer_entry->lut_index;
+-	ether_addr_copy(addba.perr_mac_addr, peer_entry->tx.da);
+-	wl_info("%s, lut=%d, tid=%d\n", __func__, peer_entry->lut_index, tid);
+-	addba.dialog_token = 1;
+-	addba.addba_param.amsdu_permit = 0;
+-	addba.addba_param.ba_policy = DOT11_ADDBA_POLICY_IMMEDIATE;
+-	addba.addba_param.tid = tid;
+-	addba.addba_param.buffer_size = WIN_SIZE;
+-	misc_work = sprd_alloc_work(sizeof(struct host_addba_param));
+-	if (!misc_work) {
+-		wl_err("%s out of memory\n", __func__);
+-		sprd_put_vif(vif);
++	memset(&saved, 0, sizeof(saved));
++	addba->addba_param.tid = tid;
++	spin_lock_bh(&hif->ba_lock);
++	lut = peer_entry->lut_index;
++	if (lut >= MAX_LUT_NUM || peer_entry != &hif->peer_entry[lut] ||
++	    !peer_entry->ht_enable || peer_entry->vowifi_enabled == 1 ||
++	    !is_valid_ether_addr(peer_entry->tx.da)) {
++		spin_unlock_bh(&hif->ba_lock);
+ 		return;
+ 	}
+-	misc_work->vif = vif;
+-	misc_work->id = SPRD_WORK_ADDBA;
+-	misc_work->hw_type = hif->hw_type;
+-	work_data = misc_work->data;
+-	memcpy(work_data, &addba, sizeof(struct host_addba_param));
+-
+-	sprd_queue_work(vif->priv, misc_work);
++	addba->lut_index = lut;
++	ether_addr_copy(addba->perr_mac_addr, peer_entry->tx.da);
++	saved.ctx_id = peer_entry->ctx_id;
++	saved.generation = hif->ba_generation[lut];
++	spin_unlock_bh(&hif->ba_lock);
++	vif = sc2355_ctxid_to_vif(hif->priv, saved.ctx_id);
++	if (!vif)
++		return;
++	/* Gate/retry rejection must not allocate on every data packet. */
++	spin_lock_bh(&hif->ba_lock);
++	ready = sc2355_ba_ready(hif, vif, &saved, ktime_get_ns());
++	spin_unlock_bh(&hif->ba_lock);
++	if (!ready)
++		goto put_vif;
++	work = sprd_alloc_work(sizeof(saved));
++	if (!work) {
++		/* Retain the stock per-peer retry interval under memory pressure,
++		 * without claiming BA success or blocking any other client.
++		 */
++		spin_lock_bh(&hif->ba_lock);
++		now = ktime_get_ns();
++		if (sc2355_ba_ready(hif, vif, &saved, now))
++			peer_entry->time[tid] = now;
++		spin_unlock_bh(&hif->ba_lock);
++		goto put_vif;
++	}
++	now = ktime_get_ns();
++	spin_lock_bh(&hif->ba_lock);
++	if (!sc2355_ba_ready(hif, vif, &saved, now)) {
++		spin_unlock_bh(&hif->ba_lock);
++		kfree(work);
++		goto put_vif;
++	}
++	/* Short state lock only; no CAS loop, sleep, or firmware wait. */
++	if (sc2355_ba_stagger(hif, vif)) {
++		hif->ba_last_admit = now;
++		hif->ba_gate_valid = true;
++	}
++	peer_entry->time[tid] = now;
++	set_bit(tid, &hif->ba_pending[lut]);
++	set_bit(tid, &peer_entry->ba_tx_done_map);
++	spin_unlock_bh(&hif->ba_lock);
++	addba->dialog_token = 1;
++	addba->addba_param.amsdu_permit = 0;
++	addba->addba_param.ba_policy = DOT11_ADDBA_POLICY_IMMEDIATE;
++	addba->addba_param.tid = tid;
++	addba->addba_param.buffer_size = 64;
++	work->vif = vif;
++	work->id = SPRD_WORK_ADDBA;
++	work->hw_type = hif->hw_type;
++	work->release = sc2355_ba_release_work;
++	payload = (struct sc2355_ba_work *)work->data;
++	*payload = saved;
++	if (hif->fw_power_down == 1) {
++		hif->fw_power_down = 0;
++		sc2355_work_host_wakeup_fw(vif);
++	}
++	sprd_queue_work(vif->priv, work);
++put_vif:
+ 	sprd_put_vif(vif);
+ }
+ 
+@@ -2351,65 +2365,68 @@ void sc2355_tx_delba(struct sprd_hif *hif,
+ 	work_data = misc_work->data;
+ 	memcpy(work_data, &delba, sizeof(struct host_delba_param));
+ 
+-	clear_bit(qos_index_2_tid(ac_index), &peer_entry->ba_tx_done_map);
++	sc2355_ba_deltxba(hif, peer_entry->lut_index, qos_index_2_tid(ac_index));
+ 
+ 	sprd_queue_work(vif->priv, misc_work);
+ 	sprd_put_vif(vif);
+ }
+ 
+-void sc2355_tx_ba_mgmt(struct sprd_priv *priv, struct sprd_vif *vif,
++static int sc2355_ba_command(struct sprd_priv *priv, struct sprd_vif *vif,
+ 			    void *data, int len, unsigned char cmd_id)
+ {
+ 	struct sprd_msg *msg;
+-	unsigned char *data_ptr;
++	u16 rlen = 1 + sizeof(struct host_addba_param);
+ 	u8 *rbuf;
+-	u16 rlen = (1 + sizeof(struct host_addba_param));
+-	int ret = 0;
++	int ret;
+ 
++	/* Allocate reply first: get_cmdbuf owns a pooled command and skb. */
++	rbuf = kzalloc(rlen, GFP_KERNEL);
++	if (!rbuf)
++		return -ENOMEM;
+ 	msg = get_cmdbuf(priv, vif, len, cmd_id);
+ 	if (!msg) {
+-		wl_err("%s, %d, get msg err\n", __func__, __LINE__);
+-		return;
++		kfree(rbuf);
++		return -ENOMEM;
+ 	}
+-
+-	rbuf = kzalloc(rlen, GFP_KERNEL);
+-	if (!rbuf)
+-		return;
+-
+ 	memcpy(msg->data, data, len);
+-	data_ptr = (unsigned char *)data;
+ 	ret = send_cmd_recv_rsp(priv, msg, rbuf, &rlen);
+-	if (ret || rlen == 0)
+-		goto out;
+-	/*if tx ba req failed, need to clear txba map*/
+-	if (cmd_id == CMD_ADDBA_REQ && rbuf[0] != ADDBA_REQ_RESULT_SUCCESS) {
+-		struct host_addba_param *addba;
+-		struct sprd_peer_entry *peer_entry = NULL;
+-		struct sprd_hif *hif = &priv->hif;
+-		u16 tid = 0;
+-
+-		addba = (struct host_addba_param *)(rbuf + 1);
+-		if (addba->lut_index >= MAX_LUT_NUM || addba->addba_param.tid >= NUM_TIDS) {
+-			wl_err("TID/lut_index is too large, lut_index: %d, tid: %d\n",
+-				addba->lut_index, addba->addba_param.tid);
+-			goto out;
+-		}
+-		peer_entry = &hif->peer_entry[addba->lut_index];
+-		tid = addba->addba_param.tid;
+-		if (!test_and_clear_bit(tid, &peer_entry->ba_tx_done_map))
+-			goto out;
+-		wl_err
+-		    ("%s, %d, tx_addba failed, reason=%d, lut_index=%d, tid=%d, map=%lu\n",
+-		     __func__, __LINE__, rbuf[0], addba->lut_index, tid,
+-		     peer_entry->ba_tx_done_map);
+-	}
+-out:
++	if (!ret && cmd_id == CMD_ADDBA_REQ &&
++	    (!rlen || rbuf[0] != ADDBA_REQ_RESULT_SUCCESS))
++		ret = -EIO;
+ 	kfree(rbuf);
++	return ret;
++}
++
++void sc2355_tx_ba_mgmt(struct sprd_priv *priv, struct sprd_vif *vif,
++			    void *data, int len, unsigned char cmd_id)
++{
++	sc2355_ba_command(priv, vif, data, len, cmd_id);
+ }
+ 
+ void sc2355_tx_send_addba(struct sprd_vif *vif, void *data, int len)
+ {
+-  	sc2355_tx_ba_mgmt(vif->priv, vif, data, len, CMD_ADDBA_REQ);
++	struct sprd_hif *hif = &vif->priv->hif;
++	struct sc2355_ba_work *work = data;
++	bool valid;
++	int ret;
++
++	if (len != sizeof(*work))
++		return;
++	spin_lock_bh(&hif->ba_lock);
++	valid = sc2355_ba_matches(hif, work) && vif->ctx_id == work->ctx_id;
++	if (valid) {
++		struct sprd_peer_entry *peer = &hif->peer_entry[work->request.lut_index];
++
++		valid = peer->ht_enable && peer->vowifi_enabled != 1;
++	}
++	spin_unlock_bh(&hif->ba_lock);
++	if (!valid) {
++		sc2355_ba_finish(hif, work, false);
++		return;
++	}
++	ret = sc2355_ba_command(vif->priv, vif, &work->request,
++				 sizeof(work->request), CMD_ADDBA_REQ);
++	sc2355_ba_finish(hif, work, !ret);
+ }
+ 
+ void sc2355_tx_send_delba(struct sprd_vif *vif, void *data, int len)
+-- 
+2.34.1
+

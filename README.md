@@ -1,6 +1,6 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep14-charles`**（上游新内核基线 `e5-6.18` + 补丁 0006–0010，[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep14)）。
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep15-charles`**（上游新内核基线 `e5-6.18` + 补丁 0006–0010 和 0012–0014）。
 
 **刷机包已移到单独的仓库 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)**（含这个内核、按上游 e5-linux 从源码重建的系统、信息屏应用、LuCI 网页升级）；本仓库只发内核。
 
@@ -42,7 +42,8 @@ e5-sleep13 及以前：官方 E5 内核构建流程（linux-lts-e5 `020b970e351e
 
 | 内核 | 补丁 | 说明 |
 |---|---|---|
-| `6.18.54-e5-sleep14-charles` | 上游 e5-6.18 + 0006–0010 | 当前版本；内核基线换成上游 `e5-6.18`（b93bbc3a，已含 0001–0005 和满电校准），版本号不再带 git 后缀，与 e5-sleep14 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep14) |
+| `6.18.54-e5-sleep15-charles` | 上游 e5-6.18 + 0006–0010、0012–0014 | 当前版本；加 0012（E5 屏幕控制器抖动）、0013（f_ncm 发送忙时重试刷新）、0014（SC2355 Wi-Fi BA 重建），都按上游 e5-linux 441839bd 的实现移植；`build-e5.sh` 的 `SLEEP=10`。 |
+| `6.18.54-e5-sleep14-charles` | 上游 e5-6.18 + 0006–0010 | 内核基线换成上游 `e5-6.18`（b93bbc3a，已含 0001–0005 和满电校准），版本号不再带 git 后缀，与 e5-sleep14 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep14) |
 | `6.18.54-e5-sleep13-charles` | 0001–0011 | 加 0011（充满时把电量计校准到 100%），与 e5-sleep13 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep13) |
 | `6.18.54-e5-sleep12-charles` | 0001–0010 | 完整重编，0010 编进模块树，与 e5-sleep12 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12) |
 | `6.18.54-e5-sleep8-charles` | 0001–0009 | 上游 e5-linux `bb8775e` 的内核适配，编译者 `charles@e5`；e5-sleep10 / 11 刷机包在它上面单独替换了 0010 的 Wi-Fi 驱动模块。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep8) |
