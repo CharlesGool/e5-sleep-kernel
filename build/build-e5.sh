@@ -10,6 +10,7 @@
 #            full-charge check (0011) are upstream there; + 0006-0010.  The release has no SCM suffix
 #            (upstream: LOCALVERSION_AUTO=n): 6.18.54<LOCALVERSION>
 #   SLEEP=10: SLEEP=9 + 0012 (ST7365P dithering) 0013 (f_ncm timer retry) 0014 (SC2355 BA rearm)
+#   SLEEP=11: SLEEP=10 + 0015 (tlsc6x: a contact held still for 30 s is released and the controller reset)
 #   SLEEP=2: SLEEP=1 + the GPU (0004) and camera power domain (0005) patches, camsys built in
 set -euo pipefail
 NAME=$1 LV=$2 SLEEP=$3
@@ -26,6 +27,8 @@ if [ "$SLEEP" -ge 9 ]; then
     for p in 0006 0007 0008 0009 0010; do patch -p1 -N < /root/e5/in/kernel/$p-*.patch; done
     # (SLEEP=10: + the E5 panel dithering, the NCM timer retry and the SC2355 BA rearm, adapted from e5-linux 441839bd)
     if [ "$SLEEP" -ge 10 ]; then for p in 0012 0013 0014; do patch -p1 -N < /root/e5/in/kernel/$p-*.patch; done; fi
+    # (SLEEP=11: + the touch panel lets go of a contact it never released, 2026-11-06)
+    if [ "$SLEEP" -ge 11 ]; then patch -p1 -N < /root/e5/in/kernel/0015-*.patch; fi
 else
 if [ "$SLEEP" != 0 ]; then
     patch -p1 -N < /root/e5/in/kernel/0001-watchdog-ump9620-stop-across-system-suspend.patch

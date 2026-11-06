@@ -1,0 +1,139 @@
+From 83d4304ea8264da68e9bae03c2f31d3ada0f847a Mon Sep 17 00:00:00 2001
+From: charles <gzcheng0822@gmail.com>
+Date: Fri, 6 Nov 2026 15:49:38 +0800
+Subject: [PATCH] input: tlsc6x: let go of a contact that stays still for 30 s
+
+After a charger was plugged in, the E5's tlsc6x controller reported one
+contact (id 0 at about [97:108]) as down for hours and never as up, and
+never reported zero points either, so tlsc6x_clear_report_data() never
+ran.  Every real finger became the second contact; the info screen's
+lock swipe wants one finger and the panel looked dead until the UI was
+restarted (libinput ignores contacts already down when it opens the
+device).
+
+Track how long each contact has stayed within 12 px.  The ESD thread
+(every 4 s) resets the controller, which re-learns its baseline, and
+releases every slot once one has been still for 30 s; the IRQ is
+disabled around it so no report runs across the reset.  finger_down
+moves to file scope so the reset and a no-points report clear it too.
+
+A reset leaves one all-zero frame behind: the first read after it gave
+"touch down id: 0, coord [0:0]", a tap in the corner.  Points at
+[0:0] are skipped.
+---
+ .../input/touchscreen/tlsc6x/tlsc6x_main.c    | 57 ++++++++++++++++++-
+ 1 file changed, 56 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/input/touchscreen/tlsc6x/tlsc6x_main.c b/drivers/input/touchscreen/tlsc6x/tlsc6x_main.c
+index 4ae6364..4fb099c 100644
+--- a/drivers/input/touchscreen/tlsc6x/tlsc6x_main.c
++++ b/drivers/input/touchscreen/tlsc6x/tlsc6x_main.c
+@@ -517,6 +517,29 @@ int tssc_get_debug_info(struct i2c_client *i2c_client, char *p_data)
+ }
+ #endif
+ 
++/*
++ * A contact the controller never lets go of: after a charger was plugged in,
++ * one point stayed down for hours, so every real finger became the second one
++ * (and a touch UI that wants one finger saw none).  A contact that has not
++ * moved for E5_STILL_SECS is taken for that: the ESD thread resets the
++ * controller, which re-learns its baseline, and releases every slot.
++ */
++#define E5_STILL_SECS	30
++#define E5_STILL_PX	12
++static char finger_down[TS_MAX_FINGER];
++static unsigned long e5_still_since[TS_MAX_FINGER];
++static u16 e5_still_x[TS_MAX_FINGER], e5_still_y[TS_MAX_FINGER];
++
++static void e5_still_track(u8 id, u16 x, u16 y, bool new_down)
++{
++	if (new_down || abs((int)x - e5_still_x[id]) > E5_STILL_PX ||
++	    abs((int)y - e5_still_y[id]) > E5_STILL_PX) {
++		e5_still_since[id] = jiffies;
++		e5_still_x[id] = x;
++		e5_still_y[id] = y;
++	}
++}
++
+ static int tlsc6x_update_data(void)
+ {
+     struct tlsc6x_data *data = i2c_get_clientdata(this_client);
+@@ -526,7 +549,6 @@ static int tlsc6x_update_data(void)
+     int i;
+     u16 x, y;
+     u8 ft_pressure, ft_size;
+-    static char finger_down[TS_MAX_FINGER] = {0};
+     u8 id = 0;
+ 
+ #ifdef TLSC_APK_DEBUG
+@@ -569,6 +591,9 @@ static int tlsc6x_update_data(void)
+ 		}
+ 		x = (s16) (buf[6 * i + 3] & 0x0F) << 8 | (s16) buf[6 * i + 4];
+ 		y = (s16) (buf[6 * i + 5] & 0x0F) << 8 | (s16) buf[6 * i + 6];
++		/* e5: the frame read right after a controller reset is all zeros */
++		if (x == 0 && y == 0)
++			continue;
+ 		ft_pressure = buf[6 * i + 7];
+ 		if (ft_pressure > 127) {
+ 			ft_pressure = 127;
+@@ -583,6 +608,9 @@ static int tlsc6x_update_data(void)
+ 			if (!finger_down[id]) {
+ 				finger_down[id] = 1;
+ 				tlsc_info("touch down id: %d, coord [%d:%d]\n",id, x, y);
++				e5_still_track(id, x, y, true);
++			} else {
++				e5_still_track(id, x, y, false);
+ 			}
+ #ifdef TLSC_REPORT_BY_ZTE_ALGO
+ 		if (tpd_cdev->zte_tp_algo) {
+@@ -637,6 +665,7 @@ static int tlsc6x_update_data(void)
+ 		}
+ 	}
+ 	if (event->touch_point == 0) {
++		memset(finger_down, 0, sizeof(finger_down));
+ 		tlsc6x_clear_report_data(data);
+ 	}
+ 	input_sync(data->input_dev);
+@@ -1356,6 +1385,29 @@ int tlsc6x_create_apk_debug_channel(struct i2c_client *client)
+ #ifdef TLSC_ESD_HELPER_EN
+ unsigned char g_tlsc6x_esdtar = 0;
+ unsigned char g_tlsc6x_esdadr = 0xa3;
++/* the ESD thread: a contact held still for E5_STILL_SECS, see e5_still_track() */
++static bool e5_still_release(void)
++{
++	int i;
++
++	for (i = 0; i < TS_MAX_FINGER; i++)
++		if (finger_down[i] &&
++		    time_after(jiffies, e5_still_since[i] + E5_STILL_SECS * HZ))
++			break;
++	if (i == TS_MAX_FINGER)
++		return false;
++
++	tlsc_info("e5: id %d still at [%d:%d] for %d s, resetting the controller\n",
++		  i, e5_still_x[i], e5_still_y[i], E5_STILL_SECS);
++	/* not from the IRQ thread: wait for it, so no report runs across the reset */
++	disable_irq(this_client->irq);
++	tlsc6x_tpd_reset_force();
++	memset(finger_down, 0, sizeof(finger_down));
++	tlsc6x_clear_report_data(g_tp_drvdata);
++	enable_irq(this_client->irq);
++	return true;
++}
++
+ static int esd_check_work(void)
+ {
+ 	int ret = -1;
+@@ -1367,6 +1419,9 @@ static int esd_check_work(void)
+ 		return 1;
+ 	}
+ 
++	if (e5_still_release())
++		return 0;
++
+ 	ret = tlsc6x_read_reg(this_client, g_tlsc6x_esdadr, &test_val);
+ 
+ 	if (ret < 0) {		/* maybe confused by some noise,so retry is make sense. */
+-- 
+2.52.0.windows.1
+

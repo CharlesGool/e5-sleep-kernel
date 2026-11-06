@@ -1,6 +1,6 @@
 # e5-sleep 内核 · Deep Sleep Kernel for Rongyue E5
 
-容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep15-charles`**（上游新内核基线 `e5-6.18` + 补丁 0006–0010 和 0012–0014）。
+容悦 E5（展锐 UMS9621）OpenWrt 的深度休眠内核，当前版本 **`6.18.54-e5-sleep16-charles`**（上游新内核基线 `e5-6.18` + 补丁 0006–0010 和 0012–0015）。
 
 **刷机包已移到单独的仓库 [e5-openwrt-flasher](https://github.com/CharlesGool/e5-openwrt-flasher)**（含这个内核、按上游 e5-linux 从源码重建的系统、信息屏应用、LuCI 网页升级）；本仓库只发内核。
 
@@ -42,7 +42,8 @@ e5-sleep13 及以前：官方 E5 内核构建流程（linux-lts-e5 `020b970e351e
 
 | 内核 | 补丁 | 说明 |
 |---|---|---|
-| `6.18.54-e5-sleep15-charles` | 上游 e5-6.18 + 0006–0010、0012–0014 | 当前版本；加 0012（E5 屏幕控制器抖动）、0013（f_ncm 发送忙时重试刷新）、0014（SC2355 Wi-Fi BA 重建），都按上游 e5-linux 441839bd 的实现移植；`build-e5.sh` 的 `SLEEP=10`。 |
+| `6.18.54-e5-sleep16-charles` | 上游 e5-6.18 + 0006–0010、0012–0015 | 当前版本；加 0015（触摸芯片报告的触点 30 秒不动时复位芯片、松开所有触点，修“触摸放久了死掉”）；`build-e5.sh` 的 `SLEEP=11`。 |
+| `6.18.54-e5-sleep15-charles` | 上游 e5-6.18 + 0006–0010、0012–0014 | 加 0012（E5 屏幕控制器抖动）、0013（f_ncm 发送忙时重试刷新）、0014（SC2355 Wi-Fi BA 重建），都按上游 e5-linux 441839bd 的实现移植；`build-e5.sh` 的 `SLEEP=10`。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep15) |
 | `6.18.54-e5-sleep14-charles` | 上游 e5-6.18 + 0006–0010 | 内核基线换成上游 `e5-6.18`（b93bbc3a，已含 0001–0005 和满电校准），版本号不再带 git 后缀，与 e5-sleep14 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep14) |
 | `6.18.54-e5-sleep13-charles` | 0001–0011 | 加 0011（充满时把电量计校准到 100%），与 e5-sleep13 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep13) |
 | `6.18.54-e5-sleep12-charles` | 0001–0010 | 完整重编，0010 编进模块树，与 e5-sleep12 刷机包同名。[Release](https://github.com/CharlesGool/e5-sleep-kernel/releases/tag/kernel-e5-sleep12) |
@@ -174,6 +175,16 @@ Wi-Fi 芯片（SC2355 / Marlin3，SDIO）在热点有流量时偶尔会固件断
 
 0010 只改 `sprd_wlan_combo.ko`，vermagic 不变：可以用同一份构建树单独编这个模块，替换 rootfs 和 boot_b initramfs 里的同名文件（e5-sleep10 / 11 就是这样做的）；e5-sleep12 起整个内核按 SLEEP=7 重编。
 
+## 触摸屏卡住的触点（0015）
+
+用户反馈：屏幕放久了触摸会“死掉”，重启信息屏才恢复。日志显示，插上充电器约 20 秒后，触摸芯片（tlsc6x）报告 id 0 在 `[97:108]` 按下，之后几个小时既没报抬起，也没报“0 个触点”；而驱动只在这两种情况下才释放触点。此后每根真手指都成了第二个触点，信息屏锁屏的上滑只认单指，于是怎么滑都解不开。重启 UI 能恢复，是因为 libinput 打开设备时会忽略已经按着的触点。
+
+0015 记录每个触点在 12 px 内停了多久。驱动的 ESD 线程每 4 秒检查一次，发现有触点 30 秒没动，就复位芯片（芯片会重新学习基线）并释放所有触点；复位期间关掉触摸中断。复位后读到的第一帧全是 0，`[0:0]` 的点会被跳过（否则左上角会出现一次误点）。日志 `e5: id N still at [x:y] for 30 s, resetting the controller`。
+
+实测：手指按住不动，约 33 秒后芯片复位、触点释放，没有 `[0:0]` 的假按下。
+
+tlsc6x 从 boot_b 的 initramfs 加载，而且原版驱动不能 `rmmod`（`tlsc6x_remove` 里的 `free_irq` 会导致内核 panic），所以只能重新打包 boot 镜像来测试。信息屏这一侧也改成了按手指 id 跟踪（刷机包仓库 `patch-infoscreen-sleep16.py`），所以在驱动释放卡住的触点之前，触摸也不会失灵。
+
 ## 安装 e5-sleep1（旧方法，已过时）
 
 现在请直接用 [刷机包](https://github.com/CharlesGool/e5-openwrt-flasher)。下面是最早的 e5-sleep1 单独安装方法，留作参考。
@@ -223,7 +234,7 @@ adb shell su -c sh /data/e5linux/restore-boot-b.sh
 
 现在用的是 [`build/build-e5.sh`](build/build-e5.sh)：在官方构建容器 `e5-mainline-build` 里按 e5-linux 的
 `device/linux_device_e5/prepare-kernel.py` 准备内核，再按 `SLEEP` 级别打补丁（1：0001–0003；2：+0004/0005；3：+0006；
-4：+0007；5：+0008；6：+0009；7：+0010；8：+0011）。e5-sleep13 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep13` 是 linux-lts-e5
+4：+0007；5：+0008；6：+0009；7：+0010；8：+0011；9：上游 e5-6.18 基线 + 0006–0010；10：+0012–0014；11：+0015）。e5-sleep13 的做法（`TOP` 指向 e5-linux `bb8775e` 的检出，`k-sleep13` 是 linux-lts-e5
 `020b970e3` 的 worktree）：
 
 ```sh
